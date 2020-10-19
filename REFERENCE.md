@@ -1,1 +1,1 @@
-LLVM-IR Specification: [](http://llvm.org/docs/LangRef.html)
+- [LLVM-IR Specification](http://llvm.org/docs/LangRef.html)
