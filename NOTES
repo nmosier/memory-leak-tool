@@ -1,0 +1,1 @@
+malloc() and free() are generally not called in loops. If they are, it is probably in a range-based for loop that is guaranteed to terminate. Perhaps we could use this fact later on if we move on to considering loops.
