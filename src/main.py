@@ -94,9 +94,9 @@ def block_get_id(block) -> int:
     if line:
         return int(re.match(r'\d+', line).group())
     else:
-        return -1
+        return 1
 
-def block_get_preds(block):
+def block_get_pred_ids(block):
     line = block_get_desc(block)
     if line:
         block_strs = re.findall(r'%\d+', line)
@@ -104,14 +104,23 @@ def block_get_preds(block):
     else:
         return list()
 
+def block_id_to_block(block_id: int, fn):
+    for blk in fn.blocks:
+        if block_get_id(blk) == block_id:
+            return blk
+    return None
+    
+def block_get_preds(block, fn):
+    return list(map(lambda block_id: block_id_to_block(block_id, fn), block_get_pred_ids(block)))
+
 first_func = list(function_defs)[0]
 last_block = list(first_func.blocks)[-1]
 print("Predecessor blocks of last block: ");
 for block in predecessor_blocks(last_block):
     print(block)
-              
+
 
 for fn in function_defs:
     for blk in fn.blocks:
         print("block id = {}".format(block_get_id(blk)))
-        print("block preds = ", block_get_preds(blk))
+        print("block preds = ", block_get_preds(blk, fn))
