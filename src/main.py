@@ -3,6 +3,7 @@
 from llvmlite import binding as llvm
 from llvmlite import ir as lc
 import sys
+import re
 
 def usage(file=sys.stdout):
     print("usage: {} <ll-asm-file>".format(sys.argv[0]), file=file)
@@ -65,6 +66,10 @@ for block in list(function_defs)[0].blocks:
         if cur_inst.opcode in ["br", "switch"]:
             for operand in cur_inst.operands:
                 print("Operand:", operand)
+                print("Attributes:")
+                for attribute in operand.attributes:
+                    print(attribute)
+                print("Type:", operand.type)
 
 # get list of blocks that directly precede this block
 def predecessor_blocks(successor):
@@ -77,10 +82,36 @@ def predecessor_blocks(successor):
                     blocks.append(block)
     return blocks
 
-                
+def block_get_desc(block) -> str:
+    lines = str(block).split('\n')
+    for line in lines:
+        if re.match(r'\d+:\s+; preds = ', line):
+            return line
+    return None
+
+def block_get_id(block) -> int:
+    line = block_get_desc(block)
+    if line:
+        return int(re.match(r'\d+', line).group())
+    else:
+        return -1
+
+def block_get_preds(block):
+    line = block_get_desc(block)
+    if line:
+        block_strs = re.findall(r'%\d+', line)
+        return list(map(lambda block_str: int(block_str[1:]), block_strs))
+    else:
+        return list()
+
 first_func = list(function_defs)[0]
 last_block = list(first_func.blocks)[-1]
 print("Predecessor blocks of last block: ");
 for block in predecessor_blocks(last_block):
     print(block)
               
+
+for fn in function_defs:
+    for blk in fn.blocks:
+        print("block id = {}".format(block_get_id(blk)))
+        print("block preds = ", block_get_preds(blk))
