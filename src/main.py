@@ -42,46 +42,6 @@ def find_calls(fn):
                         free_calls.append(inst)
     return (malloc_calls, free_calls)
                         
-
-
-for fn in function_defs:
-    (malloc_calls, free_calls) = find_calls(fn)
-    print("malloc calls in function {}:".format(fn.name))
-    for inst in malloc_calls:
-        print(inst)
-    print("free calls in function {}:".format(fn.name))
-    for inst in free_calls:
-        print(inst)
-
-for fn in function_defs:
-    for blk in fn.blocks:
-        print(blk)
-
-
-
-for block in list(function_defs)[0].blocks:
-        # get last instruction of current block
-        cur_inst = list(block.instructions)[-1]
-        print("Inst:", cur_inst)
-        if cur_inst.opcode in ["br", "switch"]:
-            for operand in cur_inst.operands:
-                print("Operand:", operand)
-                print("Attributes:")
-                for attribute in operand.attributes:
-                    print(attribute)
-                print("Type:", operand.type)
-
-# get list of blocks that directly precede this block
-def predecessor_blocks(successor):
-    blocks = []
-    for block in successor.function.blocks:
-        last_inst = list(block.instructions)[-1]
-        if last_inst.opcode in ["br", "switch"]:
-            for operand in last_inst.operands:
-                if operand == successor:
-                    blocks.append(block)
-    return blocks
-
 def block_get_desc(block) -> str:
     lines = str(block).split('\n')
     for line in lines:
@@ -110,17 +70,77 @@ def block_id_to_block(block_id: int, fn):
             return blk
     return None
     
-def block_get_preds(block, fn):
-    return list(map(lambda block_id: block_id_to_block(block_id, fn), block_get_pred_ids(block)))
+def block_get_preds(block):
+    return list(map(lambda block_id: block_id_to_block(block_id, block.function), block_get_pred_ids(block)))
 
-first_func = list(function_defs)[0]
-last_block = list(first_func.blocks)[-1]
-print("Predecessor blocks of last block: ");
-for block in predecessor_blocks(last_block):
-    print(block)
+def function_get_pred_graph(fn):
+    graph = dict()
+    for block in fn.blocks:
+        graph[block] = block_get_preds(block)
+    return graph
 
+def print_pred_graph_at_block(pred_graph, block):
+    # TODO
+    return
 
+def pred_graph_get_paths_to_block(pred_graph, block, prefix=list()):
+    prefix = prefix + [block]
+    if len(pred_graph[block]) == 0:
+        # reached start block
+        return [prefix[::-1]];
+    else:
+        paths = list()
+        for pred_block in pred_graph[block]:
+            paths.extend(pred_graph_get_paths_to_block(pred_graph, pred_block, prefix))
+        return paths
+
+def block_get_transitions(block):
+    # get last instruction
+    last_inst = list(block.instructions)[-1]
+    last_inst_str = str(last_inst)
+    if last_inst.opcode != "br":
+        return {}
+    operands = re.findall(r'%\w+', last_inst_str)
+    if re.match(r'\s*br label', last_inst_str):
+        assert len(operands) == 1
+        return {operands[0]: 'T'}
+    elif re.match(r'\s*br i1', last_inst_str):
+        return {operands[1]: '{} != 0'.format(operands[0]),
+                operands[2]: '{} == 0'.format(operands[0])}
+    else:
+        assert(False)
+
+def path_get_constraints(path):
+    constraints = []
+    prev_block = path[0]
+    for i in range(1, len(path)):
+        cur_block = path[i]
+        transitions = block_get_transitions(prev_block)
+        key = '%' + str(block_get_id(cur_block))
+        constraints.append(transitions[key])
+        prev_block = path[i]
+    return constraints
+    
 for fn in function_defs:
     for blk in fn.blocks:
         print("block id = {}".format(block_get_id(blk)))
-        print("block preds = ", block_get_preds(blk, fn))
+        print("block preds = ", block_get_preds(blk))
+
+for fn in function_defs:
+    (mallocs, frees) = find_calls(fn)
+    print("frees:")
+    for free in frees:
+        print(free)
+        print(block_get_pred_ids(free.block))
+        print("pred graph begin")
+        pred_graph = function_get_pred_graph(fn)
+        paths = pred_graph_get_paths_to_block(pred_graph, free.block)
+        for path in paths:
+            print(path_get_constraints(path))
+        print("pred graph end")
+
+print("block transitions:")
+for fn in function_defs:
+    for blk in fn.blocks:
+        print("block:", blk)
+        print("transitions:", block_get_transitions(blk))
