@@ -2,6 +2,8 @@
 
 from llvmlite import binding as llvm
 from llvmlite import ir as lc
+from pysmt.shortcuts import *
+from pysmt.typing import *
 import sys
 import re
 
@@ -49,22 +51,22 @@ def block_get_desc(block) -> str:
             return line
     return None
 
-def block_get_id(block) -> int:
+def block_get_id(block) -> str:
     line = block_get_desc(block)
     if line:
-        return int(re.match(r'\d+', line).group())
+        return re.match(r'\d+', line).group()
     else:
-        return 1
+        return '1'
 
 def block_get_pred_ids(block):
     line = block_get_desc(block)
     if line:
         block_strs = re.findall(r'%\d+', line)
-        return list(map(lambda block_str: int(block_str[1:]), block_strs))
+        return list(map(lambda block_str: block_str[1:], block_strs))
     else:
         return list()
 
-def block_id_to_block(block_id: int, fn):
+def block_id_to_block(block_id: str, fn):
     for blk in fn.blocks:
         if block_get_id(blk) == block_id:
             return blk
@@ -100,13 +102,13 @@ def block_get_transitions(block):
     last_inst_str = str(last_inst)
     if last_inst.opcode != "br":
         return {}
-    operands = re.findall(r'%\w+', last_inst_str)
+    operands = list(map(lambda s: s[1:], re.findall(r'%\w+', last_inst_str)))
     if re.match(r'\s*br label', last_inst_str):
         assert len(operands) == 1
         return {operands[0]: 'T'}
     elif re.match(r'\s*br i1', last_inst_str):
-        return {operands[1]: '{} != 0'.format(operands[0]),
-                operands[2]: '{} == 0'.format(operands[0])}
+        return {operands[1]: 'v{} != 0'.format(operands[0]),
+                operands[2]: 'v{} == 0'.format(operands[0])}
     else:
         assert(False)
 
@@ -116,7 +118,7 @@ def path_get_constraints(path):
     for i in range(1, len(path)):
         cur_block = path[i]
         transitions = block_get_transitions(prev_block)
-        key = '%' + str(block_get_id(cur_block))
+        key = block_get_id(cur_block)
         constraints.append(transitions[key])
         prev_block = path[i]
     return constraints
@@ -144,3 +146,4 @@ for fn in function_defs:
     for blk in fn.blocks:
         print("block:", blk)
         print("transitions:", block_get_transitions(blk))
+
