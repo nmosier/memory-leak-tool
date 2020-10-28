@@ -80,7 +80,29 @@ class Path:
             constraints.append(transitions[key])
             prev_block = path[i]
         return constraints
+
+class Variable:
+    target_data = llvm.create_target_data('')
     
+    def __init__(self, llvm_inst: llvm.ValueRef, name: str, type_bits: int):
+        self.llvm_inst = llvm_inst
+        self.name = name
+        self.symbol = Symbol('v_' + self.name, BVType(type_bits))
+
+    @staticmethod
+    def from_inst(llvm_inst: llvm.ValueRef):
+        assert llvm_inst.is_instruction
+        inst_str = str(llvm_inst)
+        padded_assign = re.match('\s+%\w+', inst_str)
+        if padded_assign == None:
+            return None
+        else:
+            padded_assign_str = padded_assign.group(0)
+            assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
+            type_bits = Variable.target_data.get_abi_size(llvm_inst.type) * 8
+            return Variable(llvm_inst, assign, type_bits)
+
+        
 class Function:
     def __init__(self, llvm_fn: llvm.ValueRef):
         assert(llvm_fn.is_function)
@@ -88,6 +110,8 @@ class Function:
         self.blocks = list(map(lambda llvm_blk: Block(llvm_blk), llvm_fn.blocks))
         self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
         self.pred_graph = self.get_pred_graph()
+        self.variables = Function.get_variables(llvm_fn)
+        self.variables_dict = dict(map(lambda var: (var.name, var), self.variables))
 
     def __str__(self):
         return str(self.llvm_fn)
@@ -123,6 +147,20 @@ class Function:
                         calls.append(inst)
         return calls
 
+    @staticmethod
+    def get_variables(llvm_fn: llvm.ValueRef) -> list:
+        variables = [] 
+        for llvm_blk in llvm_fn.blocks:
+            for llvm_inst in llvm_blk.instructions:
+                var = Variable.from_inst(llvm_inst)
+                if var != None:
+                    variables.append(var)
+        return variables
+
+    def get_variable(name: str) -> Variable:
+        return self.variable_dict[name]
+        
+
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
         self.llvm_module = llvm_module
@@ -155,6 +193,8 @@ module = Module.parse_file(ll_path)
 for fn in module.function_definitions:
     print('function:')
     print(fn.pred_graph)
+    print('variables:')
+    print(fn.variables)
     for block in fn.blocks:
         print('block {}:'.format(block.name))
         print(block.pred_names)
