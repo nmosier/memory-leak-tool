@@ -35,9 +35,9 @@ class Block:
 
     @staticmethod
     def get_pred_names(desc: str) -> list:
-        if desc:
-            names = re.findall(r'%d+', desc)
-            return list(map(lambda name: name[1:], names[1:]))
+        if desc != None:
+            names = re.findall(r'%\d+', desc)
+            return list(map(lambda name: name[1:], names))
         else:
             return list()
 
@@ -63,8 +63,14 @@ class Path:
         self.blk_list = blk_list
         self.constraints = Path.get_constraints(blk_list)
 
+    def __str__(self):
+        blknames = map(lambda blk: blk.name, self.blk_list)
+        blkstr = ' -> '.join(blknames)
+        constraint_str = ' & '.join(self.constraints)
+        return '({}, {})'.format(blkstr, constraint_str)
+
     @staticmethod
-    def get_constraints(blk_list):
+    def get_constraints(path: list):
         constraints = []
         prev_block = path[0]
         for i in range(1, len(path)):
@@ -80,14 +86,14 @@ class Function:
         assert(llvm_fn.is_function)
         self.llvm_fn = llvm_fn
         self.blocks = list(map(lambda llvm_blk: Block(llvm_blk), llvm_fn.blocks))
-        self.blkname_to_block_map = map(lambda block: (block.name, block), self.blocks)
+        self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
         self.pred_graph = self.get_pred_graph()
 
     def __str__(self):
         return str(self.llvm_fn)
         
     def blkname_to_block(self, blkname: str) -> Block:
-        return self.blkname_to_block_map[blkname]
+        return self.blkname_to_block_dict[blkname]
 
     def get_block_preds(self, block: Block) -> list:
         return list(map(lambda blkname: self.blkname_to_block(blkname), block.pred_names))
@@ -99,12 +105,12 @@ class Function:
         prefix = prefix + [block]
         if len(self.pred_graph[block]) == 0:
             # base case: reached start block
-            return [prefix[::-1]];
+            return [Path(prefix[::-1])]
         else:
             # recursive case 
             paths = list()
-            for pred_block in pred_graph[block]:
-                paths.extend(pred_graph_get_paths_to_block(pred_graph, pred_block, prefix))
+            for pred_block in self.pred_graph[block]:
+                paths.extend(self.get_paths_to_block(pred_block, prefix))
             return paths
 
     def get_calls(self, name: str) -> list:
@@ -136,19 +142,22 @@ class Module:
 def usage(file=sys.stdout):
     print("usage: {} <ll-asm-file>".format(sys.argv[0]), file=file)
 
-if len(sys.argv) != 2:
-    usage(sys.stderr)
-    sys.exit(1)
-
 llvm.initialize()
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
+if len(sys.argv) != 2:
+    usage(sys.stderr)
+    sys.exit(1)
 ll_path = sys.argv[1]
-
 module = Module.parse_file(ll_path)
 
-print('function definitions:')
 for fn in module.function_definitions:
-    print(fn)
-
+    print('function:')
+    print(fn.pred_graph)
+    for block in fn.blocks:
+        print('block {}:'.format(block.name))
+        print(block.pred_names)
+        print('paths to block {}:'.format(block.name))
+        for path in fn.get_paths_to_block(block):
+            print(path)
