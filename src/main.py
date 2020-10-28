@@ -122,7 +122,25 @@ def path_get_constraints(path):
         constraints.append(transitions[key])
         prev_block = path[i]
     return constraints
-    
+
+# get list of variable names 
+def function_get_variable_names(fn):
+    names = []
+    for blk in fn.blocks:
+        for inst in blk.instructions:
+            inst_str = str(inst)
+            padded_assign = re.match('\s+%\w+', inst_str)
+            if padded_assign:
+                padded_assign_str = padded_assign.group(0)
+                assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
+                names.append(assign)
+    return names
+
+# get list of PySMT variables
+def function_get_variable_symbols(fn):
+    names = function_get_variable_names(fn)
+    # map(lambda name: Symbol(name, 
+
 for fn in function_defs:
     for blk in fn.blocks:
         print("block id = {}".format(block_get_id(blk)))
@@ -143,7 +161,9 @@ for fn in function_defs:
 
 print("block transitions:")
 for fn in function_defs:
+    print(function_get_variable_names(fn))
     for blk in fn.blocks:
         print("block:", blk)
         print("transitions:", block_get_transitions(blk))
+
 
