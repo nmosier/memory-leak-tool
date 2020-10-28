@@ -7,16 +7,38 @@ from pysmt.typing import *
 import sys
 import re
 
-class Block:
-    def __init__(self, llvm_blk: llvm.ValueRef):
-        assert llvm_blk.is_block
 
+class Variable:
+    target_data = llvm.create_target_data('')
+    
+    def __init__(self, llvm_inst: llvm.ValueRef, name: str, type_bits: int):
+        self.llvm_inst = llvm_inst
+        self.name = name
+        self.type_bits = type_bits
+        self.symbol = Symbol('v_' + self.name, BVType(type_bits))
+
+    @staticmethod
+    def from_inst(llvm_inst: llvm.ValueRef):
+        assert llvm_inst.is_instruction
+        inst_str = str(llvm_inst)
+        padded_assign = re.match('\s+%\w+', inst_str)
+        if padded_assign == None:
+            return None
+        else:
+            padded_assign_str = padded_assign.group(0)
+            assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
+            type_bits = Variable.target_data.get_abi_size(llvm_inst.type) * 8
+            return Variable(llvm_inst, assign, type_bits)
+
+
+class Block:
+    def __init__(self, llvm_blk: llvm.ValueRef, variables_dict: dict):
+        assert llvm_blk.is_block
         self.llvm_blk = llvm_blk
-        
         desc = Block.get_desc(llvm_blk)
         self.name = Block.get_name(desc)
         self.pred_names = Block.get_pred_names(desc)
-        self.transitions = Block.get_transitions(llvm_blk)
+        self.transitions = Block.get_transitions(llvm_blk, variables_dict)
 
     @staticmethod
     def get_desc(llvm_blk: llvm.ValueRef) -> str:
@@ -42,7 +64,7 @@ class Block:
             return list()
 
     @staticmethod
-    def get_transitions(llvm_blk: llvm.ValueRef) -> dict:
+    def get_transitions(llvm_blk: llvm.ValueRef, variables_dict: dict) -> dict:
         last_inst = list(llvm_blk.instructions)[-1]
         last_inst_str = str(last_inst)
         if last_inst.opcode != "br":
@@ -50,10 +72,16 @@ class Block:
         operands = list(map(lambda s: s[1:], re.findall(r'%\w+', last_inst_str)))
         if re.match(r'\s*br label', last_inst_str):
             assert len(operands) == 1
-            return {operands[0]: 'T'}
+            return {operands[0]: TRUE()}
+            # return {operands[0]: 'T'}
         elif re.match(r'\s*br i1', last_inst_str):
-            return {operands[1]: 'v{} != 0'.format(operands[0]),
-                    operands[2]: 'v{} == 0'.format(operands[0])}
+            print('variables dict:', variables_dict)
+            var = variables_dict[operands[0]]
+            zero = BVZero(var.type_bits)
+            return {operands[1]: NotEquals(var.symbol, zero),
+                    operands[2]: Equals(var.symbol, zero)}
+            # return {operands[1]: 'v{} != 0'.format(operands[0]),
+            #        operands[2]: 'v{} == 0'.format(operands[0])}
         else:
             assert(False)
 
@@ -66,11 +94,11 @@ class Path:
     def __str__(self):
         blknames = map(lambda blk: blk.name, self.blk_list)
         blkstr = ' -> '.join(blknames)
-        constraint_str = ' & '.join(self.constraints)
+        constraint_str = str(self.constraints)
         return '({}, {})'.format(blkstr, constraint_str)
 
     @staticmethod
-    def get_constraints(path: list):
+    def get_constraints(path: list) -> pysmt.formula:
         constraints = []
         prev_block = path[0]
         for i in range(1, len(path)):
@@ -79,39 +107,18 @@ class Path:
             key = cur_block.name
             constraints.append(transitions[key])
             prev_block = path[i]
-        return constraints
 
-class Variable:
-    target_data = llvm.create_target_data('')
-    
-    def __init__(self, llvm_inst: llvm.ValueRef, name: str, type_bits: int):
-        self.llvm_inst = llvm_inst
-        self.name = name
-        self.symbol = Symbol('v_' + self.name, BVType(type_bits))
-
-    @staticmethod
-    def from_inst(llvm_inst: llvm.ValueRef):
-        assert llvm_inst.is_instruction
-        inst_str = str(llvm_inst)
-        padded_assign = re.match('\s+%\w+', inst_str)
-        if padded_assign == None:
-            return None
-        else:
-            padded_assign_str = padded_assign.group(0)
-            assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
-            type_bits = Variable.target_data.get_abi_size(llvm_inst.type) * 8
-            return Variable(llvm_inst, assign, type_bits)
-
+        return And(*constraints)
         
 class Function:
     def __init__(self, llvm_fn: llvm.ValueRef):
         assert(llvm_fn.is_function)
-        self.llvm_fn = llvm_fn
-        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk), llvm_fn.blocks))
-        self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
-        self.pred_graph = self.get_pred_graph()
         self.variables = Function.get_variables(llvm_fn)
         self.variables_dict = dict(map(lambda var: (var.name, var), self.variables))
+        self.llvm_fn = llvm_fn
+        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, self.variables_dict), llvm_fn.blocks))
+        self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
+        self.pred_graph = self.get_pred_graph()
 
     def __str__(self):
         return str(self.llvm_fn)
