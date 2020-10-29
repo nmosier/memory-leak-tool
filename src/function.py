@@ -109,6 +109,15 @@ class Path:
             prev_block = path[i]
 
         return And(*constraints)
+
+    def __contains__(self, val) -> bool:
+        if type(val) == Block:
+            return self.contains_block(val)
+        else:
+            assert False
+     
+    def contains_block(self, block: Block) -> bool:
+        return block in self.blk_list
         
 class Function:
     def __init__(self, llvm_fn: llvm.ValueRef):
@@ -116,8 +125,10 @@ class Function:
         self.variables = Function.get_variables(llvm_fn)
         self.variables_dict = dict(map(lambda var: (var.name, var), self.variables))
         self.llvm_fn = llvm_fn
-        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, self.variables_dict), llvm_fn.blocks))
+        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, self.variables_dict),
+                               llvm_fn.blocks))
         self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
+        self.llvmblk_to_block_dict = dict(map(lambda block: (block.llvm_blk, block), self.blocks))
         self.pred_graph = self.get_pred_graph()
 
     def __str__(self):
@@ -125,6 +136,10 @@ class Function:
         
     def blkname_to_block(self, blkname: str) -> Block:
         return self.blkname_to_block_dict[blkname]
+
+    def llvmblk_to_block(self, llvmblk: llvm.ValueRef) -> Block:
+        assert llvmblk.is_block
+        return self.llvmblk_to_block_dict[llvmblk]
 
     def get_block_preds(self, block: Block) -> list:
         return list(map(lambda blkname: self.blkname_to_block(blkname), block.pred_names))
@@ -149,7 +164,7 @@ class Function:
         for block in self.blocks:
             for inst in block.llvm_blk.instructions:
                 if inst.opcode == 'call':
-                    op1 = list(inst.operands)[0]
+                    op1 = list(inst.operands)[1]
                     if op1.name == name:
                         calls.append(inst)
         return calls
@@ -208,3 +223,27 @@ for fn in module.function_definitions:
         print('paths to block {}:'.format(block.name))
         for path in fn.get_paths_to_block(block):
             print(path)
+    print('malloc calls:', fn.get_calls('malloc'))
+    print('free calls:', fn.get_calls('free'))
+
+
+for fn in module.function_definitions:
+    mallocs = fn.get_calls('malloc')
+    frees = fn.get_calls('free')
+
+    assert len(mallocs) == 1
+    assert len(frees) == 1
+
+    malloc = mallocs[0]
+    free = frees[0]
+
+    malloc_blk = fn.llvmblk_to_block(malloc.block)
+    free_blk = fn.llvmblk_to_block(free.block)
+    
+    # find frees without corresponding mallocs
+    paths = filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk))
+    path_constraints = map(lambda path: path.constraints, paths)
+    formula = Or(*path_constraints)
+    print(formula)
+    
+        
