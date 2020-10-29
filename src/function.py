@@ -17,6 +17,9 @@ class Variable:
         self.type_bits = type_bits
         self.symbol = Symbol('v_' + self.name, BVType(type_bits))
 
+    def __str__(self) -> str:
+        return self.name
+        
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef):
         assert llvm_inst.is_instruction
@@ -75,7 +78,6 @@ class Block:
             return {operands[0]: TRUE()}
             # return {operands[0]: 'T'}
         elif re.match(r'\s*br i1', last_inst_str):
-            print('variables dict:', variables_dict)
             var = variables_dict[operands[0]]
             zero = BVZero(var.type_bits)
             return {operands[1]: NotEquals(var.symbol, zero),
@@ -118,6 +120,10 @@ class Path:
      
     def contains_block(self, block: Block) -> bool:
         return block in self.blk_list
+
+    def free_variables(self, fn: Function) -> list:
+        return list(map(lambda var: fn.pysmtsym_to_variable(var),
+                        self.constraints.get_free_variables()))
         
 class Function:
     def __init__(self, llvm_fn: llvm.ValueRef):
@@ -130,6 +136,7 @@ class Function:
         self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
         self.llvmblk_to_block_dict = dict(map(lambda block: (block.llvm_blk, block), self.blocks))
         self.pred_graph = self.get_pred_graph()
+        self.symbol_to_var_dict = dict(map(lambda var: (var.symbol, var), self.variables))
 
     def __str__(self):
         return str(self.llvm_fn)
@@ -181,7 +188,9 @@ class Function:
 
     def get_variable(name: str) -> Variable:
         return self.variable_dict[name]
-        
+
+    def pysmtsym_to_variable(self, pysmtsym: Symbol) -> Variable:
+        return self.symbol_to_var_dict[pysmtsym]
 
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
@@ -213,21 +222,6 @@ ll_path = sys.argv[1]
 module = Module.parse_file(ll_path)
 
 for fn in module.function_definitions:
-    print('function:')
-    print(fn.pred_graph)
-    print('variables:')
-    print(fn.variables)
-    for block in fn.blocks:
-        print('block {}:'.format(block.name))
-        print(block.pred_names)
-        print('paths to block {}:'.format(block.name))
-        for path in fn.get_paths_to_block(block):
-            print(path)
-    print('malloc calls:', fn.get_calls('malloc'))
-    print('free calls:', fn.get_calls('free'))
-
-
-for fn in module.function_definitions:
     mallocs = fn.get_calls('malloc')
     frees = fn.get_calls('free')
 
@@ -245,5 +239,10 @@ for fn in module.function_definitions:
     path_constraints = map(lambda path: path.constraints, paths)
     formula = Or(*path_constraints)
     print(formula)
+
+    free_vars = list(map(fn.pysmtsym_to_variable, formula.get_free_variables()))
+    print('free variables:');
+    for var in free_vars:
+        print(var)
     
         
