@@ -11,15 +11,31 @@ import re
 class Variable:
     target_data = llvm.create_target_data('')
     
-    def __init__(self, llvm_inst: llvm.ValueRef, name: str, type_bits: int):
+    def __init__(self, llvm_inst: llvm.ValueRef, name: str, smt_type: PySMTType):
         self.llvm_inst = llvm_inst
         self.name = name
-        self.type_bits = type_bits
-        self.symbol = Symbol('v_' + self.name, BVType(type_bits))
+        self.smt_type = smt_type
+        self.symbol = Symbol('v_' + self.name, self.smt_type)
 
     def __str__(self) -> str:
         return self.name
-        
+
+    @staticmethod
+    def get_type_from_inst(llvm_inst: llvm.ValueRef) -> PySMTType:
+        llvm_type = llvm_inst.type
+        if llvm_type.is_pointer:
+            return BVType(Variable.target_data.get_abi_size(llvm_type) * 8)
+        else:
+            llvm_type_s = str(llvm_type)
+            match = re.match('i\d+', llvm_type_s)
+            assert match != None
+            bits_str = match.group(0)[1:]
+            bits = int(bits_str)
+            if bits == 1:
+                return BOOL
+            else:
+                return BVType(bits)
+                
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef):
         assert llvm_inst.is_instruction
@@ -30,8 +46,7 @@ class Variable:
         else:
             padded_assign_str = padded_assign.group(0)
             assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
-            type_bits = Variable.target_data.get_abi_size(llvm_inst.type) * 8
-            return Variable(llvm_inst, assign, type_bits)
+            return Variable(llvm_inst, assign, Variable.get_type_from_inst(llvm_inst))
 
     # returns formula
     def get_def_constraint(self, var_dict: dict):
@@ -41,7 +56,9 @@ class Variable:
         opcode = inst.opcode
         if opcode == 'icmp':
             for operand in inst.operands:
-                print(operand, operand.name)
+                print('operand:', operand)
+        
+
 
 class Block:
     def __init__(self, llvm_blk: llvm.ValueRef, variables_dict: dict):
@@ -85,14 +102,11 @@ class Block:
         if re.match(r'\s*br label', last_inst_str):
             assert len(operands) == 1
             return {operands[0]: TRUE()}
-            # return {operands[0]: 'T'}
         elif re.match(r'\s*br i1', last_inst_str):
             var = variables_dict[operands[0]]
-            zero = BVZero(var.type_bits)
-            return {operands[1]: NotEquals(var.symbol, zero),
-                    operands[2]: Equals(var.symbol, zero)}
-            # return {operands[1]: 'v{} != 0'.format(operands[0]),
-            #        operands[2]: 'v{} == 0'.format(operands[0])}
+            assert var.smt_type == BOOL
+            return {operands[1]: var.symbol,
+                    operands[2]: Not(var.symbol)}
         else:
             assert(False)
 
@@ -254,7 +268,19 @@ for fn in module.function_definitions:
     for var in free_vars:
         print(var)
 
+    print(list(map(lambda var: str(var), fn.variables)))
+
     # TEST
-    print(fn.get_variable('6').get_def_constraint(None))
+    print('def constraint:', fn.get_variable('6').get_def_constraint(None))
     
         
+    with Solver() as solver:
+        solver.add_assertion(formula)
+        res = solver.solve()
+        if res:
+            print('SAT')
+            # print_solution(solver.get_model())
+            print(solver.get_model())
+        else:
+            print('UNSAT')
+

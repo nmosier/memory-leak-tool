@@ -1,0 +1,6 @@
+TODO
+
+[ ] Need to propogate free variables
+    Start with queue of free variables. For each free variable, find its definition and generate
+    corresponding SMT formulas, adding dependent variables as necessary
+    [ ] Given variable, produce PySMT constraint describing definition
