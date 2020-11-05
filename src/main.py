@@ -10,8 +10,10 @@ import re
 class Variable:
     target_data = llvm.create_target_data('')
     
-    def __init__(self, llvm_inst: llvm.ValueRef, name: str, smt_type: PySMTType):
-        self.llvm_inst = llvm_inst
+    def __init__(self, llvm_val: llvm.ValueRef, name: str, smt_type: PySMTType, fn):
+        assert type(fn) == Function
+        self.fn = fn
+        self.llvm_val = llvm_val
         self.name = name
         self.smt_type = smt_type
         self.symbol = Symbol('v_' + self.name, self.smt_type)
@@ -20,7 +22,8 @@ class Variable:
         return self.name
                 
     @staticmethod
-    def from_inst(llvm_inst: llvm.ValueRef):
+    def from_inst(llvm_inst: llvm.ValueRef, fn):
+        assert type(fn) == Function
         assert llvm_inst.is_instruction
         inst_str = str(llvm_inst)
         padded_assign = re.match('\s+%\w+', inst_str)
@@ -29,20 +32,21 @@ class Variable:
         else:
             padded_assign_str = padded_assign.group(0)
             assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
-            return Variable(llvm_inst, assign, Operand.get_type_from_value(llvm_inst))
+            return Variable(llvm_inst, assign, Operand.get_type_from_value(llvm_inst), fn)
 
     # returns formula
-    def get_def_constraint(self, var_dict: dict):
-        assert var_dict != None
-        # handler of signature (opcodes) -> formula
-        # handler = {'icmp': lambda 
-        inst = self.llvm_inst
+    def get_def_constraint(self):
+        var_dict = self.fn.variables_dict
+        if self.llvm_val.is_argument:
+            return TRUE()
+        assert self.llvm_val.is_instruction
+        inst = self.llvm_val
         inst_str = str(inst)
         inst_toks = inst_str.split()
         assert inst_toks[1] == '='
         opcode = inst.opcode
         if opcode == 'icmp':
-            atoms = list(map(lambda op: Operand.get_atom_from_operand(op, var_dict), inst.operands))
+            atoms = list(map(lambda op: Operand.get_atom_from_operand(op, self.fn), inst.operands))
             cond = inst_toks[3]
             formulas = {'eq': Equals,
                         'ne': NotEquals,
@@ -55,9 +59,40 @@ class Variable:
                         'slt': BVSLT,
                         'sle': BVSLE
                         }
-            return formulas[cond](*atoms)
+            return formulas[cond](*atoms) # TODO -- this should check that symbol equals result!
+        elif opcode == 'load':
+            atoms = list(map(lambda op: Operand.get_atom_from_operand(op, self.fn), inst.operands))
+            paths = self.fn.get_paths_to_block(self.fn.llvmblk_to_block(inst.block))
+            path_constraints = map(lambda path: path.constraints, paths)
+            path_stores = map(lambda path: Store.get_most_recent_store(atoms[0], path, self.fn),
+                              paths)
+            path_values = zip(path_constraints, path_stores)
+            values = map(lambda cs: And(cs[0], Equals(self.symbol, cs[1])), path_values)
+            return Or(*values)
         # TODO: other opcodes
 
+class Store:
+    @staticmethod
+    def get_most_recent_store(var, path, fn):
+        assert type(fn) == Function
+        if type(var) == Variable:
+            symbol = var.symbol
+        else:
+            symbol = var
+        
+        for blk in reversed(path.blk_list):
+            for inst in reversed(list(blk.llvm_blk.instructions)):
+                inst_str = str(inst)
+                inst_toks = inst_str.split()
+                if inst.opcode == 'store':
+                    operands = list(inst.operands)
+                    val_op = operands[0]
+                    ptr_op = operands[1]
+                    ptr_atom = Operand.get_atom_from_operand(ptr_op, fn)
+                    if ptr_atom == symbol:
+                        return Operand.get_atom_from_operand(val_op, fn)
+        assert False # uninitialized value -- handle later
+        
 class Operand:
     @staticmethod
     def get_type_from_value(llvm_val: llvm.ValueRef) -> PySMTType:
@@ -76,9 +111,10 @@ class Operand:
                 return BVType(bits)
 
     @staticmethod
-    def get_atom_from_operand(llvm_op: llvm.ValueRef, var_dict: dict):
+    def get_atom_from_operand(llvm_op: llvm.ValueRef, fn):
         assert llvm_op.is_operand
-        assert var_dict != None
+        assert type(fn) == Function
+        var_dict = fn.variables_dict
 
         op_str = str(llvm_op)
         # distinguish between variables and constants
@@ -90,6 +126,7 @@ class Operand:
             return var_dict[full_var_str[1:]].symbol
         else:
             # is constant
+            print('op_str:',op_str)
             op_toks = op_str.split()
             smt_type = Operand.get_type_from_value(llvm_op)
             val = int(op_toks[1])
@@ -187,7 +224,7 @@ class Path:
 class Function:
     def __init__(self, llvm_fn: llvm.ValueRef):
         assert(llvm_fn.is_function)
-        self.variables = Function.get_variables(llvm_fn)
+        self.variables = self._get_variables(llvm_fn)
         self.variables_dict = dict(map(lambda var: (var.name, var), self.variables))
         self.llvm_fn = llvm_fn
         self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, self.variables_dict),
@@ -235,14 +272,20 @@ class Function:
                         calls.append(inst)
         return calls
 
-    @staticmethod
-    def get_variables(llvm_fn: llvm.ValueRef) -> list:
+    def _get_variables(self, llvm_fn: llvm.ValueRef) -> list:
         variables = [] 
         for llvm_blk in llvm_fn.blocks:
             for llvm_inst in llvm_blk.instructions:
-                var = Variable.from_inst(llvm_inst)
+                var = Variable.from_inst(llvm_inst, self)
                 if var != None:
                     variables.append(var)
+
+        # add function arguments
+        i = 0
+        for arg in llvm_fn.arguments:
+            variables.append(Variable(arg, str(i), Operand.get_type_from_value(arg), self))
+            i += 1
+        
         return variables
 
     def get_variable(self, name: str) -> Variable:
@@ -295,6 +338,7 @@ for fn in module.function_definitions:
     
     # find frees without corresponding mallocs
     paths = filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk))
+    assert len(list(paths)) > 0
     path_constraints = map(lambda path: path.constraints, paths)
     formula = Or(*path_constraints)
     print(formula)
@@ -307,11 +351,13 @@ for fn in module.function_definitions:
     print(list(map(lambda var: str(var), fn.variables)))
 
     # TEST
-    print('def constraint:', fn.get_variable('6').get_def_constraint(fn.variables_dict))
+    print('def constraint:', fn.get_variable('6').get_def_constraint())
+    paths = filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk))
+    print('get store:', Store.get_most_recent_store(fn.get_variable('3'), list(paths)[0], fn))
 
     print('printing variable constraints')
     for var in fn.variables:
-        print(var, var.get_def_constraint(fn.variables_dict))
+        print(var, var.get_def_constraint())
     print('done')
     
     with Solver() as solver:
