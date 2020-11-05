@@ -33,6 +33,15 @@ class Variable:
             type_bits = Variable.target_data.get_abi_size(llvm_inst.type) * 8
             return Variable(llvm_inst, assign, type_bits)
 
+    # returns formula
+    def get_def_constraint(self, var_dict: dict):
+        # handler of signature (opcodes) -> formula
+        # handler = {'icmp': lambda 
+        inst = self.llvm_inst
+        opcode = inst.opcode
+        if opcode == 'icmp':
+            for operand in inst.operands:
+                print(operand, operand.name)
 
 class Block:
     def __init__(self, llvm_blk: llvm.ValueRef, variables_dict: dict):
@@ -92,7 +101,7 @@ class Path:
     def __init__(self, blk_list: list):
         self.blk_list = blk_list
         self.constraints = Path.get_constraints(blk_list)
-
+        
     def __str__(self):
         blknames = map(lambda blk: blk.name, self.blk_list)
         blkstr = ' -> '.join(blknames)
@@ -186,8 +195,8 @@ class Function:
                     variables.append(var)
         return variables
 
-    def get_variable(name: str) -> Variable:
-        return self.variable_dict[name]
+    def get_variable(self, name: str) -> Variable:
+        return self.variables_dict[name]
 
     def pysmtsym_to_variable(self, pysmtsym: Symbol) -> Variable:
         return self.symbol_to_var_dict[pysmtsym]
@@ -244,5 +253,8 @@ for fn in module.function_definitions:
     print('free variables:');
     for var in free_vars:
         print(var)
+
+    # TEST
+    print(fn.get_variable('6').get_def_constraint(None))
     
         

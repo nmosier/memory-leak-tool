@@ -123,9 +123,10 @@ def path_get_constraints(path):
         prev_block = path[i]
     return constraints
 
-# get list of variable names 
-def function_get_variable_names(fn):
-    names = []
+# get map of variable name and type tuples
+# (name, type)
+def function_get_variables(fn):
+    variables = dict()
     for blk in fn.blocks:
         for inst in blk.instructions:
             inst_str = str(inst)
@@ -133,13 +134,19 @@ def function_get_variable_names(fn):
             if padded_assign:
                 padded_assign_str = padded_assign.group(0)
                 assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
-                names.append(assign)
-    return names
+                variables[assign] = inst.type
+    return variables
+
+def llvm_type_bitsize(t: llvm.TypeRef) -> int:
+    # print(llvm.get_host_cpu_features().flatten())
+    return llvm.create_target_data('').get_abi_size(t)
 
 # get list of PySMT variables
 def function_get_variable_symbols(fn):
-    names = function_get_variable_names(fn)
-    # map(lambda name: Symbol(name, 
+    variables = function_get_variables(fn)
+    symbols_map = map(lambda name: Symbol(name, BVType(llvm_type_bitsize(variables[name]))),
+                      variables)
+    return list(symbols_map)
 
 for fn in function_defs:
     for blk in fn.blocks:
@@ -161,7 +168,7 @@ for fn in function_defs:
 
 print("block transitions:")
 for fn in function_defs:
-    print(function_get_variable_names(fn))
+    symbols = function_get_variable_symbols(fn)
     for blk in fn.blocks:
         print("block:", blk)
         print("transitions:", block_get_transitions(blk))
