@@ -7,170 +7,254 @@ from pysmt.typing import *
 import sys
 import re
 
+
+class Variable:
+    target_data = llvm.create_target_data('')
+    
+    def __init__(self, llvm_inst: llvm.ValueRef, name: str, type_bits: int):
+        self.llvm_inst = llvm_inst
+        self.name = name
+        self.type_bits = type_bits
+        self.symbol = Symbol('v_' + self.name, BVType(type_bits))
+
+    def __str__(self) -> str:
+        return self.name
+        
+    @staticmethod
+    def from_inst(llvm_inst: llvm.ValueRef):
+        assert llvm_inst.is_instruction
+        inst_str = str(llvm_inst)
+        padded_assign = re.match('\s+%\w+', inst_str)
+        if padded_assign == None:
+            return None
+        else:
+            padded_assign_str = padded_assign.group(0)
+            assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
+            type_bits = Variable.target_data.get_abi_size(llvm_inst.type) * 8
+            return Variable(llvm_inst, assign, type_bits)
+
+    # returns formula
+    def get_def_constraint(self, var_dict: dict):
+        # handler of signature (opcodes) -> formula
+        # handler = {'icmp': lambda 
+        inst = self.llvm_inst
+        opcode = inst.opcode
+        if opcode == 'icmp':
+            for operand in inst.operands:
+                print(operand, operand.name)
+
+class Block:
+    def __init__(self, llvm_blk: llvm.ValueRef, variables_dict: dict):
+        assert llvm_blk.is_block
+        self.llvm_blk = llvm_blk
+        desc = Block.get_desc(llvm_blk)
+        self.name = Block.get_name(desc)
+        self.pred_names = Block.get_pred_names(desc)
+        self.transitions = Block.get_transitions(llvm_blk, variables_dict)
+
+    @staticmethod
+    def get_desc(llvm_blk: llvm.ValueRef) -> str:
+        lines = str(llvm_blk).split('\n')
+        for line in lines:
+            if re.match(r'\d+:\s+; preds = ', line):
+                return line
+        return None
+        
+    @staticmethod
+    def get_name(desc: str) -> str:
+        if desc == None:
+            return '1'
+        else:
+            return re.match(r'\d+', desc).group()
+
+    @staticmethod
+    def get_pred_names(desc: str) -> list:
+        if desc != None:
+            names = re.findall(r'%\d+', desc)
+            return list(map(lambda name: name[1:], names))
+        else:
+            return list()
+
+    @staticmethod
+    def get_transitions(llvm_blk: llvm.ValueRef, variables_dict: dict) -> dict:
+        last_inst = list(llvm_blk.instructions)[-1]
+        last_inst_str = str(last_inst)
+        if last_inst.opcode != "br":
+            return {}
+        operands = list(map(lambda s: s[1:], re.findall(r'%\w+', last_inst_str)))
+        if re.match(r'\s*br label', last_inst_str):
+            assert len(operands) == 1
+            return {operands[0]: TRUE()}
+            # return {operands[0]: 'T'}
+        elif re.match(r'\s*br i1', last_inst_str):
+            var = variables_dict[operands[0]]
+            zero = BVZero(var.type_bits)
+            return {operands[1]: NotEquals(var.symbol, zero),
+                    operands[2]: Equals(var.symbol, zero)}
+            # return {operands[1]: 'v{} != 0'.format(operands[0]),
+            #        operands[2]: 'v{} == 0'.format(operands[0])}
+        else:
+            assert(False)
+
+            
+class Path:
+    def __init__(self, blk_list: list):
+        self.blk_list = blk_list
+        self.constraints = Path.get_constraints(blk_list)
+        
+    def __str__(self):
+        blknames = map(lambda blk: blk.name, self.blk_list)
+        blkstr = ' -> '.join(blknames)
+        constraint_str = str(self.constraints)
+        return '({}, {})'.format(blkstr, constraint_str)
+
+    @staticmethod
+    def get_constraints(path: list) -> pysmt.formula:
+        constraints = []
+        prev_block = path[0]
+        for i in range(1, len(path)):
+            cur_block = path[i]
+            transitions = prev_block.transitions
+            key = cur_block.name
+            constraints.append(transitions[key])
+            prev_block = path[i]
+
+        return And(*constraints)
+
+    def __contains__(self, val) -> bool:
+        if type(val) == Block:
+            return self.contains_block(val)
+        else:
+            assert False
+     
+    def contains_block(self, block: Block) -> bool:
+        return block in self.blk_list
+
+    def free_variables(self, fn: Function) -> list:
+        return list(map(lambda var: fn.pysmtsym_to_variable(var),
+                        self.constraints.get_free_variables()))
+        
+class Function:
+    def __init__(self, llvm_fn: llvm.ValueRef):
+        assert(llvm_fn.is_function)
+        self.variables = Function.get_variables(llvm_fn)
+        self.variables_dict = dict(map(lambda var: (var.name, var), self.variables))
+        self.llvm_fn = llvm_fn
+        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, self.variables_dict),
+                               llvm_fn.blocks))
+        self.blkname_to_block_dict = dict(map(lambda block: (block.name, block), self.blocks))
+        self.llvmblk_to_block_dict = dict(map(lambda block: (block.llvm_blk, block), self.blocks))
+        self.pred_graph = self.get_pred_graph()
+        self.symbol_to_var_dict = dict(map(lambda var: (var.symbol, var), self.variables))
+
+    def __str__(self):
+        return str(self.llvm_fn)
+        
+    def blkname_to_block(self, blkname: str) -> Block:
+        return self.blkname_to_block_dict[blkname]
+
+    def llvmblk_to_block(self, llvmblk: llvm.ValueRef) -> Block:
+        assert llvmblk.is_block
+        return self.llvmblk_to_block_dict[llvmblk]
+
+    def get_block_preds(self, block: Block) -> list:
+        return list(map(lambda blkname: self.blkname_to_block(blkname), block.pred_names))
+
+    def get_pred_graph(self) -> dict:
+        return dict(map(lambda block: (block, self.get_block_preds(block)), self.blocks))
+        
+    def get_paths_to_block(self, block, prefix=list()) -> list:
+        prefix = prefix + [block]
+        if len(self.pred_graph[block]) == 0:
+            # base case: reached start block
+            return [Path(prefix[::-1])]
+        else:
+            # recursive case 
+            paths = list()
+            for pred_block in self.pred_graph[block]:
+                paths.extend(self.get_paths_to_block(pred_block, prefix))
+            return paths
+
+    def get_calls(self, name: str) -> list:
+        calls = []
+        for block in self.blocks:
+            for inst in block.llvm_blk.instructions:
+                if inst.opcode == 'call':
+                    op1 = list(inst.operands)[1]
+                    if op1.name == name:
+                        calls.append(inst)
+        return calls
+
+    @staticmethod
+    def get_variables(llvm_fn: llvm.ValueRef) -> list:
+        variables = [] 
+        for llvm_blk in llvm_fn.blocks:
+            for llvm_inst in llvm_blk.instructions:
+                var = Variable.from_inst(llvm_inst)
+                if var != None:
+                    variables.append(var)
+        return variables
+
+    def get_variable(self, name: str) -> Variable:
+        return self.variables_dict[name]
+
+    def pysmtsym_to_variable(self, pysmtsym: Symbol) -> Variable:
+        return self.symbol_to_var_dict[pysmtsym]
+
+class Module:
+    def __init__(self, llvm_module: llvm.ModuleRef):
+        self.llvm_module = llvm_module
+        llvm_fn_defs = filter(lambda llvm_fn: not llvm_fn.is_declaration, llvm_module.functions)
+        self.function_definitions = list(map(lambda llvm_fn: Function(llvm_fn), llvm_fn_defs))
+
+    @staticmethod
+    def parse_file(path: str):
+        f = open(path, 'r')
+        contents = f.read()
+        f.close()
+        llvm_module = llvm.parse_assembly(contents)
+        llvm_module.verify()
+        return Module(llvm_module)
+
+
 def usage(file=sys.stdout):
     print("usage: {} <ll-asm-file>".format(sys.argv[0]), file=file)
-
-if len(sys.argv) != 2:
-    usage(sys.stderr)
-    sys.exit(1)
 
 llvm.initialize()
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
-    
+if len(sys.argv) != 2:
+    usage(sys.stderr)
+    sys.exit(1)
 ll_path = sys.argv[1]
-ll_file = open(ll_path, "r")
-ll_contents = ll_file.read()
-ll_file.close()
+module = Module.parse_file(ll_path)
 
-module = llvm.parse_assembly(ll_contents)
-module.verify()
+for fn in module.function_definitions:
+    mallocs = fn.get_calls('malloc')
+    frees = fn.get_calls('free')
 
-# only examine functions that are defined
-function_defs = list(filter(lambda fn: not fn.is_declaration, module.functions))
+    assert len(mallocs) == 1
+    assert len(frees) == 1
 
-# returns tuple of malloc calls and free calls
-def find_calls(fn):
-    malloc_calls = []
-    free_calls = []
-    for blk in fn.blocks:
-        for inst in blk.instructions:
-            if inst.opcode == "call":
-                for op in inst.operands:
-                    if op.name == "malloc":
-                        malloc_calls.append(inst)
-                    elif op.name == "free":
-                        free_calls.append(inst)
-    return (malloc_calls, free_calls)
-                        
-def block_get_desc(block) -> str:
-    lines = str(block).split('\n')
-    for line in lines:
-        if re.match(r'\d+:\s+; preds = ', line):
-            return line
-    return None
+    malloc = mallocs[0]
+    free = frees[0]
 
-def block_get_id(block) -> str:
-    line = block_get_desc(block)
-    if line:
-        return re.match(r'\d+', line).group()
-    else:
-        return '1'
-
-def block_get_pred_ids(block):
-    line = block_get_desc(block)
-    if line:
-        block_strs = re.findall(r'%\d+', line)
-        return list(map(lambda block_str: block_str[1:], block_strs))
-    else:
-        return list()
-
-def block_id_to_block(block_id: str, fn):
-    for blk in fn.blocks:
-        if block_get_id(blk) == block_id:
-            return blk
-    return None
+    malloc_blk = fn.llvmblk_to_block(malloc.block)
+    free_blk = fn.llvmblk_to_block(free.block)
     
-def block_get_preds(block):
-    return list(map(lambda block_id: block_id_to_block(block_id, block.function), block_get_pred_ids(block)))
+    # find frees without corresponding mallocs
+    paths = filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk))
+    path_constraints = map(lambda path: path.constraints, paths)
+    formula = Or(*path_constraints)
+    print(formula)
 
-def function_get_pred_graph(fn):
-    graph = dict()
-    for block in fn.blocks:
-        graph[block] = block_get_preds(block)
-    return graph
+    free_vars = list(map(fn.pysmtsym_to_variable, formula.get_free_variables()))
+    print('free variables:');
+    for var in free_vars:
+        print(var)
 
-def print_pred_graph_at_block(pred_graph, block):
-    # TODO
-    return
-
-def pred_graph_get_paths_to_block(pred_graph, block, prefix=list()):
-    prefix = prefix + [block]
-    if len(pred_graph[block]) == 0:
-        # reached start block
-        return [prefix[::-1]];
-    else:
-        paths = list()
-        for pred_block in pred_graph[block]:
-            paths.extend(pred_graph_get_paths_to_block(pred_graph, pred_block, prefix))
-        return paths
-
-def block_get_transitions(block):
-    # get last instruction
-    last_inst = list(block.instructions)[-1]
-    last_inst_str = str(last_inst)
-    if last_inst.opcode != "br":
-        return {}
-    operands = list(map(lambda s: s[1:], re.findall(r'%\w+', last_inst_str)))
-    if re.match(r'\s*br label', last_inst_str):
-        assert len(operands) == 1
-        return {operands[0]: 'T'}
-    elif re.match(r'\s*br i1', last_inst_str):
-        return {operands[1]: 'v{} != 0'.format(operands[0]),
-                operands[2]: 'v{} == 0'.format(operands[0])}
-    else:
-        assert(False)
-
-def path_get_constraints(path):
-    constraints = []
-    prev_block = path[0]
-    for i in range(1, len(path)):
-        cur_block = path[i]
-        transitions = block_get_transitions(prev_block)
-        key = block_get_id(cur_block)
-        constraints.append(transitions[key])
-        prev_block = path[i]
-    return constraints
-
-# get map of variable name and type tuples
-# (name, type)
-def function_get_variables(fn):
-    variables = dict()
-    for blk in fn.blocks:
-        for inst in blk.instructions:
-            inst_str = str(inst)
-            padded_assign = re.match('\s+%\w+', inst_str)
-            if padded_assign:
-                padded_assign_str = padded_assign.group(0)
-                assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
-                variables[assign] = inst.type
-    return variables
-
-def llvm_type_bitsize(t: llvm.TypeRef) -> int:
-    # print(llvm.get_host_cpu_features().flatten())
-    return llvm.create_target_data('').get_abi_size(t)
-
-# get list of PySMT variables
-def function_get_variable_symbols(fn):
-    variables = function_get_variables(fn)
-    symbols_map = map(lambda name: Symbol(name, BVType(llvm_type_bitsize(variables[name]))),
-                      variables)
-    return list(symbols_map)
-
-for fn in function_defs:
-    for blk in fn.blocks:
-        print("block id = {}".format(block_get_id(blk)))
-        print("block preds = ", block_get_preds(blk))
-
-for fn in function_defs:
-    (mallocs, frees) = find_calls(fn)
-    print("frees:")
-    for free in frees:
-        print(free)
-        print(block_get_pred_ids(free.block))
-        print("pred graph begin")
-        pred_graph = function_get_pred_graph(fn)
-        paths = pred_graph_get_paths_to_block(pred_graph, free.block)
-        for path in paths:
-            print(path_get_constraints(path))
-        print("pred graph end")
-
-print("block transitions:")
-for fn in function_defs:
-    symbols = function_get_variable_symbols(fn)
-    for blk in fn.blocks:
-        print("block:", blk)
-        print("transitions:", block_get_transitions(blk))
-
-
+    # TEST
+    print(fn.get_variable('6').get_def_constraint(None))
+    
+        
