@@ -7,7 +7,6 @@ from pysmt.typing import *
 import sys
 import re
 
-
 class Variable:
     target_data = llvm.create_target_data('')
     
@@ -19,10 +18,50 @@ class Variable:
 
     def __str__(self) -> str:
         return self.name
-
+                
     @staticmethod
-    def get_type_from_inst(llvm_inst: llvm.ValueRef) -> PySMTType:
-        llvm_type = llvm_inst.type
+    def from_inst(llvm_inst: llvm.ValueRef):
+        assert llvm_inst.is_instruction
+        inst_str = str(llvm_inst)
+        padded_assign = re.match('\s+%\w+', inst_str)
+        if padded_assign == None:
+            return None
+        else:
+            padded_assign_str = padded_assign.group(0)
+            assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
+            return Variable(llvm_inst, assign, Operand.get_type_from_value(llvm_inst))
+
+    # returns formula
+    def get_def_constraint(self, var_dict: dict):
+        assert var_dict != None
+        # handler of signature (opcodes) -> formula
+        # handler = {'icmp': lambda 
+        inst = self.llvm_inst
+        inst_str = str(inst)
+        inst_toks = inst_str.split()
+        assert inst_toks[1] == '='
+        opcode = inst.opcode
+        if opcode == 'icmp':
+            atoms = list(map(lambda op: Operand.get_atom_from_operand(op, var_dict), inst.operands))
+            cond = inst_toks[3]
+            formulas = {'eq': Equals,
+                        'ne': NotEquals,
+                        'ugt': BVUGT,
+                        'uge': BVUGE,
+                        'ult': BVULT,
+                        'ule': BVULE,
+                        'sgt': BVSGT,
+                        'sge': BVSGE,
+                        'slt': BVSLT,
+                        'sle': BVSLE
+                        }
+            return formulas[cond](*atoms)
+        # TODO: other opcodes
+
+class Operand:
+    @staticmethod
+    def get_type_from_value(llvm_val: llvm.ValueRef) -> PySMTType:
+        llvm_type = llvm_val.type
         if llvm_type.is_pointer:
             return BVType(Variable.target_data.get_abi_size(llvm_type) * 8)
         else:
@@ -35,31 +74,28 @@ class Variable:
                 return BOOL
             else:
                 return BVType(bits)
-                
+
     @staticmethod
-    def from_inst(llvm_inst: llvm.ValueRef):
-        assert llvm_inst.is_instruction
-        inst_str = str(llvm_inst)
-        padded_assign = re.match('\s+%\w+', inst_str)
-        if padded_assign == None:
-            return None
-        else:
-            padded_assign_str = padded_assign.group(0)
-            assign = padded_assign_str[padded_assign_str.find('%') + 1 : ]
-            return Variable(llvm_inst, assign, Variable.get_type_from_inst(llvm_inst))
+    def get_atom_from_operand(llvm_op: llvm.ValueRef, var_dict: dict):
+        assert llvm_op.is_operand
+        assert var_dict != None
 
-    # returns formula
-    def get_def_constraint(self, var_dict: dict):
-        # handler of signature (opcodes) -> formula
-        # handler = {'icmp': lambda 
-        inst = self.llvm_inst
-        opcode = inst.opcode
-        if opcode == 'icmp':
-            for operand in inst.operands:
-                print('operand:', operand)
+        op_str = str(llvm_op)
+        # distinguish between variables and constants
         
-
-
+        full_var_re = re.search('%\w+', op_str)
+        if full_var_re:
+            # is variable
+            full_var_str = full_var_re.group()
+            return var_dict[full_var_str[1:]].symbol
+        else:
+            # is constant
+            op_toks = op_str.split()
+            smt_type = Operand.get_type_from_value(llvm_op)
+            val = int(op_toks[1])
+            assert type(smt_type) == pysmt.typing._BVType
+            return BV(val, smt_type.width)
+            
 class Block:
     def __init__(self, llvm_blk: llvm.ValueRef, variables_dict: dict):
         assert llvm_blk.is_block
@@ -271,9 +307,13 @@ for fn in module.function_definitions:
     print(list(map(lambda var: str(var), fn.variables)))
 
     # TEST
-    print('def constraint:', fn.get_variable('6').get_def_constraint(None))
+    print('def constraint:', fn.get_variable('6').get_def_constraint(fn.variables_dict))
+
+    print('printing variable constraints')
+    for var in fn.variables:
+        print(var, var.get_def_constraint(fn.variables_dict))
+    print('done')
     
-        
     with Solver() as solver:
         solver.add_assertion(formula)
         res = solver.solve()
