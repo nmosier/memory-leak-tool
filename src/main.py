@@ -20,6 +20,9 @@ class Variable:
 
     def __str__(self) -> str:
         return self.name
+
+    def __repr__(self) -> str:
+        return str(self)
                 
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef, fn):
@@ -35,7 +38,7 @@ class Variable:
             return Variable(llvm_inst, assign, Operand.get_type_from_value(llvm_inst), fn)
 
     # returns formula
-    def get_def_constraint(self):
+    def get_def_constraint(self) -> pysmt.formula:
         var_dict = self.fn.variables_dict
         if self.llvm_val.is_argument:
             return TRUE()
@@ -59,7 +62,7 @@ class Variable:
                         'slt': BVSLT,
                         'sle': BVSLE
                         }
-            return formulas[cond](*atoms) # TODO -- this should check that symbol equals result!
+            return Iff(formulas[cond](*atoms), self.symbol)
         elif opcode == 'load':
             atoms = list(map(lambda op: Operand.get_atom_from_operand(op, self.fn), inst.operands))
             paths = self.fn.get_paths_to_block(self.fn.llvmblk_to_block(inst.block))
@@ -69,6 +72,8 @@ class Variable:
             path_values = zip(path_constraints, path_stores)
             values = map(lambda cs: And(cs[0], Equals(self.symbol, cs[1])), path_values)
             return Or(*values)
+        else:
+            return None
         # TODO: other opcodes
 
 class Store:
@@ -141,6 +146,13 @@ class Block:
         self.name = Block.get_name(desc)
         self.pred_names = Block.get_pred_names(desc)
         self.transitions = Block.get_transitions(llvm_blk, variables_dict)
+        self.insts = list(self.llvm_blk.instructions)
+
+    def __str__(self) -> str:
+        return str(self.llvm_blk)
+
+    def __repr__(self) -> str:
+        return str(self)
 
     @staticmethod
     def get_desc(llvm_blk: llvm.ValueRef) -> str:
@@ -183,6 +195,8 @@ class Block:
         else:
             assert(False)
 
+    def get_terminator(self) -> llvm.ValueRef:
+        return self.insts[-1]
             
 class Path:
     def __init__(self, blk_list: list):
@@ -194,6 +208,9 @@ class Path:
         blkstr = ' -> '.join(blknames)
         constraint_str = str(self.constraints)
         return '({}, {})'.format(blkstr, constraint_str)
+
+    def __repr__(self):
+        return str(self)
 
     @staticmethod
     def get_constraints(path: list) -> pysmt.formula:
@@ -234,8 +251,11 @@ class Function:
         self.pred_graph = self.get_pred_graph()
         self.symbol_to_var_dict = dict(map(lambda var: (var.symbol, var), self.variables))
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.llvm_fn)
+
+    def __repr__(self) -> str:
+        return str(self)
         
     def blkname_to_block(self, blkname: str) -> Block:
         return self.blkname_to_block_dict[blkname]
@@ -294,6 +314,59 @@ class Function:
     def pysmtsym_to_variable(self, pysmtsym: Symbol) -> Variable:
         return self.symbol_to_var_dict[pysmtsym]
 
+    def pysmtsyms_to_variables(self, pysmtsyms) -> list:
+        expected_types = [pysmt.formula, pysmt.fnode.FNode, list]
+        assert type(pysmtsyms) in expected_types
+        if type(pysmtsyms) != list:
+            pysmtsyms = pysmtsyms.get_free_variables()
+            
+        return list(map(self.pysmtsym_to_variable, pysmtsyms))
+
+    def define_formula_variables(self, formula: pysmt.formula) -> pysmt.formula:
+        # get free variables
+        undefined_vars = self.pysmtsyms_to_variables(formula)
+
+        # fully define them
+        defined_vars = set()
+        def_formulas = list()
+        while len(undefined_vars) > 0:
+            var = undefined_vars.pop()
+            def_formula = var.get_def_constraint()
+            def_formulas.append(def_formula)
+            defined_vars.add(var)
+            free_vars = set(self.pysmtsyms_to_variables(def_formula))
+            undefined_vars.extend(free_vars - defined_vars)
+
+        return And(*def_formulas)
+            
+    def get_block_paths(self, hit_blocks, miss_blocks) -> list:
+        full_paths = self.get_full_paths()
+        if type(hit_blocks) != set:
+            hit_blocks = set(hit_blocks)
+        if type(miss_blocks) != set:
+            miss_blocks = set(miss_blocks)
+        
+        def filter_pred(path: Path) -> bool:
+            block_set = set(path.blk_list)
+            hits = len(block_set & hit_blocks) != 0
+            misses = len(block_set & miss_blocks) != 0
+            return hits != misses
+        
+        return list(filter(filter_pred, full_paths))
+
+    # get list of blocks that exit the function
+    def get_exit_blocks(self) -> list:
+        terminators = ['ret', 'unreachable']
+        blocks = list()
+        return list(filter(lambda block: block.get_terminator().opcode in terminators, self.blocks))
+
+    def get_full_paths(self) -> list:
+        exit_blocks = self.get_exit_blocks()
+        exit_paths = list()
+        for exit_block in exit_blocks:
+            exit_paths.extend(self.get_paths_to_block(exit_block))
+        return exit_paths
+        
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
         self.llvm_module = llvm_module
@@ -336,32 +409,43 @@ for fn in module.function_definitions:
     malloc_blk = fn.llvmblk_to_block(malloc.block)
     free_blk = fn.llvmblk_to_block(free.block)
     
-    # find frees without corresponding mallocs
-    paths = filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk))
-    assert len(list(paths)) > 0
-    path_constraints = map(lambda path: path.constraints, paths)
+    # find frees without corresponding mallocs and mallocs without corresponding frees
+    paths = list(filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk)))
+    assert len(paths) > 0
+    path_constraints = list(map(lambda path: path.constraints, paths))
     formula = Or(*path_constraints)
-    print(formula)
+    print('formula (w/o defs):', formula)
+    formula = And(fn.define_formula_variables(formula), formula)
+    print('formula (w/ defs):', formula)
+
+    print('path constraints:', path_constraints)
 
     free_vars = list(map(fn.pysmtsym_to_variable, formula.get_free_variables()))
-    print('free variables:');
-    for var in free_vars:
-        print(var)
+    print('free variables:', free_vars);
 
     print(list(map(lambda var: str(var), fn.variables)))
-
-    # TEST
-    print('def constraint:', fn.get_variable('6').get_def_constraint())
-    paths = filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk))
-    print('get store:', Store.get_most_recent_store(fn.get_variable('3'), list(paths)[0], fn))
 
     print('printing variable constraints')
     for var in fn.variables:
         print(var, var.get_def_constraint())
     print('done')
+
+    print('exit paths:', fn.get_full_paths())
+
+    malloc_blocks = map(lambda inst: fn.llvmblk_to_block(inst.block), mallocs)
+    free_blocks = map(lambda inst: fn.llvmblk_to_block(inst.block), frees)
+    
+    bad_paths = fn.get_block_paths(malloc_blocks, free_blocks)
+    bad_path_constraints = list(map(lambda path: path.constraints, bad_paths))
+    formula = Or(*bad_path_constraints)
+    print('formula (w/o defs):', formula)
+    formula = And(fn.define_formula_variables(formula), formula)
+    print('formula (w/ defs):', formula)
+    
     
     with Solver() as solver:
         solver.add_assertion(formula)
+        print('formula:', formula)
         res = solver.solve()
         if res:
             print('SAT')
@@ -369,4 +453,3 @@ for fn in module.function_definitions:
             print(solver.get_model())
         else:
             print('UNSAT')
-
