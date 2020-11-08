@@ -72,6 +72,31 @@ class Variable:
             path_values = zip(path_constraints, path_stores)
             values = map(lambda cs: And(cs[0], Equals(self.symbol, cs[1])), path_values)
             return Or(*values)
+        elif opcode == 'phi':
+            # parse joined branches
+            pairs = re.findall('\[[^\]]+\]', inst_str)
+            incoming_formulas = list() # list of tuples 
+            for pair in pairs:
+                (value_raw, label_raw) = tuple(re.findall('[%\w]+', pair))
+                assert label_raw[0] == '%'
+                label = label_raw[1:]
+                # find value corresponding to this incoming block
+                value_formula = None
+                if value_raw[0] == '%':
+                    value_var = value_raw[1:]
+                    value_formula = self.fn.get_variable(value_var).symbol
+                else:
+                    value_imm = value_raw
+                    smttype = Operand.get_smttype_from_llvmtype(inst.type)
+                    value_formula = Operand.make_smtval_from_smttype(int(value_raw), smttype)
+                var_formula = Equals(self.symbol, value_formula)
+                # find path constraint corresponding to this incoming block
+                block = fn.blkname_to_block(label)
+                incoming_paths = fn.get_paths_to_block(block)
+                incoming_constraint = Or(*map(lambda path: path.constraints, incoming_paths))
+                incoming_formulas.append(And(var_formula, incoming_constraint))
+            print('incoming formulas:', incoming_formulas)
+            return Or(*incoming_formulas)
         else:
             return None
         # TODO: other opcodes
@@ -96,12 +121,17 @@ class Store:
                     ptr_atom = Operand.get_atom_from_operand(ptr_op, fn)
                     if ptr_atom == symbol:
                         return Operand.get_atom_from_operand(val_op, fn)
+
+        print('var:', var, 'path:', path)
         assert False # uninitialized value -- handle later
         
 class Operand:
     @staticmethod
     def get_type_from_value(llvm_val: llvm.ValueRef) -> PySMTType:
-        llvm_type = llvm_val.type
+        return Operand.get_smttype_from_llvmtype(llvm_val.type)
+
+    @staticmethod
+    def get_smttype_from_llvmtype(llvm_type: llvm.TypeRef) -> PySMTType:
         if llvm_type.is_pointer:
             return BVType(Variable.target_data.get_abi_size(llvm_type) * 8)
         else:
@@ -114,6 +144,16 @@ class Operand:
                 return BOOL
             else:
                 return BVType(bits)
+
+    @staticmethod
+    def make_smtval_from_smttype(val: int, smt_type: PySMTType) -> pysmt.formula:
+        if smt_type.is_bool_type():
+            m = {0: FALSE, 1: TRUE}
+            return m[val]
+        elif smt_type.is_bv_type():
+            return BV(val, smt_type.width)
+        else:
+            assert False
 
     @staticmethod
     def get_atom_from_operand(llvm_op: llvm.ValueRef, fn):
@@ -131,7 +171,6 @@ class Operand:
             return var_dict[full_var_str[1:]].symbol
         else:
             # is constant
-            print('op_str:',op_str)
             op_toks = op_str.split()
             smt_type = Operand.get_type_from_value(llvm_op)
             val = int(op_toks[1])
@@ -400,35 +439,7 @@ for fn in module.function_definitions:
     mallocs = fn.get_calls('malloc')
     frees = fn.get_calls('free')
 
-    assert len(mallocs) == 1
-    assert len(frees) == 1
-
-    malloc = mallocs[0]
-    free = frees[0]
-
-    malloc_blk = fn.llvmblk_to_block(malloc.block)
-    free_blk = fn.llvmblk_to_block(free.block)
-    
-    # find frees without corresponding mallocs and mallocs without corresponding frees
-    paths = list(filter(lambda path: malloc_blk in path, fn.get_paths_to_block(free_blk)))
-    assert len(paths) > 0
-    path_constraints = list(map(lambda path: path.constraints, paths))
-    formula = Or(*path_constraints)
-    print('formula (w/o defs):', formula)
-    formula = And(fn.define_formula_variables(formula), formula)
-    print('formula (w/ defs):', formula)
-
-    print('path constraints:', path_constraints)
-
-    free_vars = list(map(fn.pysmtsym_to_variable, formula.get_free_variables()))
-    print('free variables:', free_vars);
-
     print(list(map(lambda var: str(var), fn.variables)))
-
-    print('printing variable constraints')
-    for var in fn.variables:
-        print(var, var.get_def_constraint())
-    print('done')
 
     print('exit paths:', fn.get_full_paths())
 
