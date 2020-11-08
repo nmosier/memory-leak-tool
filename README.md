@@ -16,6 +16,9 @@ make
 cd ../src
 ./main.py ../tests/test3.ll
 ```
+## Development Status
+The tool is currently able to detect memory leaks and frees of unallocated pointers for simple, loop-free programs.
+
 ## References
 - [LLVM IR Reference Manual](https://llvm.org/docs/LangRef.html)
 - [llvmlite Documentation](https://llvmlite.readthedocs.io/en/latest/index.html)
