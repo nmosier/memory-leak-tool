@@ -6,6 +6,7 @@ from pysmt.shortcuts import *
 from pysmt.typing import *
 import sys
 import re
+import argparse
 
 class Variable:
     target_data = llvm.create_target_data('')
@@ -405,7 +406,7 @@ class Function:
         for exit_block in exit_blocks:
             exit_paths.extend(self.get_paths_to_block(exit_block))
         return exit_paths
-        
+
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
         self.llvm_module = llvm_module
@@ -429,15 +430,22 @@ llvm.initialize()
 llvm.initialize_native_target()
 llvm.initialize_native_asmprinter()
 
-if len(sys.argv) != 2:
-    usage(sys.stderr)
-    sys.exit(1)
-ll_path = sys.argv[1]
+parser = argparse.ArgumentParser()
+parser.add_argument('file', type=str, nargs=1)
+parser.add_argument('-f', '--funcs', type=str, default='malloc,free')
+args = parser.parse_args()
+funcs = args.funcs.split(',')
+if len(funcs) != 2:
+    print('{}: --funcs: exactly two comma-separated function names are required'.
+          format(sys.argv[0]), file=sys.stderr)
+    exit(1)
+assert len(args.file) == 1
+ll_path = args.file[0]
 module = Module.parse_file(ll_path)
 
 for fn in module.function_definitions:
-    mallocs = fn.get_calls('malloc')
-    frees = fn.get_calls('free')
+    mallocs = fn.get_calls(funcs[0])
+    frees = fn.get_calls(funcs[1])
 
     print(list(map(lambda var: str(var), fn.variables)))
 
