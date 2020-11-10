@@ -345,8 +345,9 @@ class SymbolicStore:
         return self.tab[var]
 
 class ExecutionEngine:
-    def __init__(self, fn: Function):
+    def __init__(self, fn: Function, pred):
         self.fn = fn
+        self.pred = pred
         # self.path type: [(block: Block, formula: pysmt.formula)],
         # where block is component of path and formula is the symbolic expression that must be true
         # to transition from previous block to this block (for the first block, it is simply 'True')
@@ -376,7 +377,10 @@ class ExecutionEngine:
         path.append((block, list()))
 
         # Is this point reachable?
-        self.check(path)
+        check_res = self.check(path)
+
+        if not check_res:
+            return
 
         # apply instructions 
         self.run_block(block, path, assignments, store)
@@ -388,7 +392,8 @@ class ExecutionEngine:
             self.run_rec(suc_blk, path, assignments, store)
             del path[-1][1][-1]
 
-    def check(self, path: list):
+    # returns whether to continue
+    def check(self, path: list) -> bool: 
         print('checking path reachability...')
         print('path:', list(map(lambda pair: pair[0].name, path)))
         
@@ -404,10 +409,26 @@ class ExecutionEngine:
             res = solver.solve()
             if res:
                 print('SAT')
-                print(solver.get_model())
+                model = solver.get_model()
+                values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
+                # print(values)
+                is_sat = True
             else:
                 print('UNSAT')
-            
+                is_sat = False
+
+        permitted = self.pred(list(map(lambda p: p[0], path)))
+        is_violation = is_sat and not permitted # is_violation := is_sat => permitted
+        terminate_path = is_violation or not is_sat
+        if is_violation:
+            print('=================')
+            print('VIOLATION')
+            print('path:', list(map(lambda pair: pair[0].name, path)))
+            print('model:', values)
+            print('=================')
+
+        return not terminate_path
+        
     def run(self):
         # start_blkname = str(len(list(self.fn.arguments)))
         # start_blk = self.fn.blkname_to_block(start_blkname)
@@ -432,7 +453,10 @@ for fn in module.function_definitions:
     for blk in fn.blocks:
         continue
 
-    eng = ExecutionEngine(fn)
+    def pred(path: list[Block]) -> bool:
+        return True
+    
+    eng = ExecutionEngine(fn, pred)
     eng.run()
     
 
