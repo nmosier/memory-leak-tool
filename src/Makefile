@@ -1,3 +1,3 @@
 .PHONY: test
 test:
-	./main.py ../tests/test3.ll
+	./block.py ../tests/test3.ll

@@ -81,7 +81,6 @@ class Variable(Value):
         self.name = name
         self.type = Type(llvm_val.type)
         self.symbol = Symbol('v_' + self.name, self.type.pysmt_type)
-        print('created variable {}'.format(self.symbol))
 
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef):
@@ -108,7 +107,6 @@ class Immediate(Value):
     def __init__(self, llvm_op: llvm.ValueRef):
         Value.__init__(self, llvm_op)
         llvm_op_str = str(llvm_op)
-        print('Immediate:', llvm_op_str)
         val_str = llvm_op_str.split()[1]
         if val_str == 'null':
             self.imm = 0
@@ -154,7 +152,6 @@ class Operand(Value):
 
     def formula(self, assignments: dict) -> pysmt.formula:
         if self.kind == Operand.Kind.VARIABLE:
-            print('formula:', self.value.llvm_val)
             return assignments[self.value]
         elif self.kind == Operand.Kind.IMMEDIATE:
             return self.value.pysmt_formula
@@ -187,6 +184,7 @@ class Instruction(Value):
              'load':  self._load,
              'phi':   self._phi,
              'alloca':self._alloca,
+             'call':  self._call,
              }
         d[self.opcode](path, assignments, store)
         
@@ -200,12 +198,11 @@ class Instruction(Value):
         src = self.operands[0]
         assert src.kind == Operand.Kind.VARIABLE
         load_formula = store.load(src.value)
-        print('load_formula:', load_formula)
         def_formula = Equals(self.defined_variable.symbol, load_formula)
         assignments[self.defined_variable] = load_formula
         path[-1][1].append(def_formula)
 
-    def _alloca(self, path: list, assigments: dict, store):
+    def _alloca(self, path: list, assignments: dict, store):
         assignments[self.defined_variable] = TRUE()
         store.alloc(self.defined_variable)
 
@@ -231,25 +228,39 @@ class Instruction(Value):
     def _phi(self, path: list, assignments: dict, store):
         # find branches (2nd of pairs)
         labels = re.findall('%\w+\s*\]', str(self.llvm_val))
-        labels = list(map(lambda label: re.findall('\w+', label), labels))
+        labels = list(map(lambda label: re.findall('\w+', label)[0], labels))
         # get blocks from labels
         assert len(labels) == len(self.operands)
         for (op, label) in zip(self.operands, labels):
-            if label == path[-1][0].name:
-                def_formula = Equals(op.formula(assignments), self.symbol)
+            if label == path[-2][0].name:
+                phi_formula = op.formula(assignments)
+                def_formula = Equals(self.defined_variable.symbol, phi_formula)
+                assignments[self.defined_variable] = phi_formula
                 path[-1][1].append(def_formula)
                 break
+
+    def _call(self, path: list, assignments: dict, store):
+        fn = self.operands[-1].value.name # function is last operand for some reason
+        rettype = None
+        if self.defined_variable == None:
+            # result is discarded
+            return
+
+        rettype = self.defined_variable.type
+            
+        if fn == 'malloc':
+            assignments[self.defined_variable] = self.defined_variable.symbol
+        
                 
 class Block(Value):
     def __init__(self, llvm_blk: llvm.ValueRef, str2var: dict):
         Value.__init__(self, llvm_blk)
         self.predecessors = list() # populated later
-        # set the name
-        re_name = re.match('\d+', str(llvm_blk))
+        re_name = re.match('\d+', str(llvm_blk).split('\n')[1])
         if re_name == None:
             self.name = str(len(list(llvm_blk.function.arguments)))
         else:
-            self.name = re_name
+            self.name = re_name.group()
         
     def init1(self, str2var: dict, str2blk: dict):
         self.successors = Block._get_successors(self.llvm_val, str2var, str2blk)
@@ -260,7 +271,7 @@ class Block(Value):
     def _get_successors(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) -> dict:
         last_inst = list(llvm_blk.instructions)[-1]
         last_inst_str = str(last_inst)
-        if last_inst.opcode != "br":
+        if last_inst.opcode != 'br':
             return dict()
 
         operand_strs = list(map(str, last_inst.operands))
@@ -273,8 +284,10 @@ class Block(Value):
             assert len(operand_strs) == 3
             var = str2var[operand_strs[0]]
             assert var.type.pysmt_type == BOOL
-            return {str2blk[operand_strs[1]]: var.symbol,
-                    str2blk[operand_strs[2]]: Not(var.symbol)}
+            print('operands_strs[1] = {}'.format(operand_strs[1]))
+            # NOTE: Had to swap these for some strange reason.
+            return {str2blk[operand_strs[2]]: var.symbol,
+                    str2blk[operand_strs[1]]: Not(var.symbol)}
         else:
             assert False
 
@@ -299,10 +312,25 @@ class Type:
         else:
             self.pysmt_type = BVType(self.bitwidth)
 
+    def value(self, val: int) -> pysmt.formula:
+        if self.pysmt_type.is_bool_type():
+            d = {1: TRUE(), 0: FALSE()}
+            assert val in d
+            return d[val]
+        elif self.pysmt_type.is_bv_type():
+            return BV(val, self.bitwidth)
+        else:
+            assert False
+
 class SymbolicStore:
     def __init__(self, fn: Function):
         self.fn = fn
         self.tab = dict()
+
+    def __copy__(self):
+        store = SymbolicStore(self.fn)
+        store.tab = copy(self.tab)
+        return store
 
     def alloc(self, var: Variable):
         assert not var in self.tab
@@ -319,19 +347,73 @@ class SymbolicStore:
 class ExecutionEngine:
     def __init__(self, fn: Function):
         self.fn = fn
-        self.symstore = SymbolicStore(fn)
         # self.path type: [(block: Block, formula: pysmt.formula)],
         # where block is component of path and formula is the symbolic expression that must be true
         # to transition from previous block to this block (for the first block, it is simply 'True')
-        self.path = list()
-        # TODO
 
-    def run(self, steps):
-        start_blkname = str(len(list(fn.arguments)))
-        start_blk = fn.blkname_to_block(start_blkname)
-        self.path.append((start_blk, TRUE)) # add first block
+    @staticmethod
+    def _copy_path(path: list) -> list:
+        return list(map(copy, path))
 
-        # TODO
+    @staticmethod
+    def _copy_assignments(assignments: dict) -> dict:
+        return copy(assignments)
+
+    @staticmethod
+    def _copy_store(store: dict) -> dict:
+        return copy(store)
+        
+    def run_block(self, block: Block, path: list, assignments: dict, store: SymbolicStore):
+        for inst in block.instructions[:-1]:
+            inst.apply(path, assignments, store)
+
+    def run_rec(self, block: Block, path: list, assignments: dict, store: SymbolicStore):
+        path = self._copy_path(path)
+        assignments = self._copy_assignments(assignments)
+        store = self._copy_store(store)
+
+        # add this block to path
+        path.append((block, list()))
+
+        # Is this point reachable?
+        self.check(path)
+
+        # apply instructions 
+        self.run_block(block, path, assignments, store)
+        
+        # recurse on branches
+        for suc_blk in block.successors:
+            suc_pred = block.successors[suc_blk]
+            path[-1][1].append(suc_pred)
+            self.run_rec(suc_blk, path, assignments, store)
+            del path[-1][1][-1]
+
+    def check(self, path: list):
+        print('checking path reachability...')
+        print('path:', list(map(lambda pair: pair[0].name, path)))
+        
+        constraints = list()
+        for pair in path:
+            for constraint in pair[1]:
+                constraints.append(constraint)
+        formula = And(*constraints)
+
+        with Solver() as solver:
+            solver.add_assertion(formula)
+            print('formula:', formula)
+            res = solver.solve()
+            if res:
+                print('SAT')
+                print(solver.get_model())
+            else:
+                print('UNSAT')
+            
+    def run(self):
+        # start_blkname = str(len(list(self.fn.arguments)))
+        # start_blk = self.fn.blkname_to_block(start_blkname)
+        start_blk = self.fn.blocks[0]
+        assignments = dict(map(lambda arg: (arg, arg.symbol), fn.arguments))
+        self.run_rec(start_blk, list(), assignments, SymbolicStore(self.fn))
 
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1)
@@ -350,14 +432,8 @@ for fn in module.function_definitions:
     for blk in fn.blocks:
         continue
 
-    path = list()
-    path.append((fn.blocks[0], []))
-
-    store = SymbolicStore(fn)
-    assignments = dict(map(lambda arg: (arg, arg.symbol), fn.arguments))
-    for inst in fn.blocks[0].instructions[:-1]:
-        inst.apply(path, assignments, store)
-
-    print(path)
+    eng = ExecutionEngine(fn)
+    eng.run()
+    
 
 
