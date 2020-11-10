@@ -266,6 +266,8 @@ class Block(Value):
         self.successors = Block._get_successors(self.llvm_val, str2var, str2blk)
         self.instructions = list(map(lambda llvm_inst: Instruction(llvm_inst, str2var, str2blk),
                                      self.llvm_val.instructions))
+        # whether returns
+        self.returns = self.instructions[-1].opcode in ['ret']
 
     @staticmethod
     def _get_successors(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) -> dict:
@@ -290,6 +292,14 @@ class Block(Value):
                     str2blk[operand_strs[1]]: Not(var.symbol)}
         else:
             assert False
+
+    def calls(self, name: str) -> list[Instruction]:
+        l = list()
+        for inst in self.instructions:
+            if inst.opcode == 'call':
+                if inst.operands[-1].value.name == name:
+                    l.append(inst)
+        return l
 
 class Type:
     target_data = llvm.create_target_data('')
@@ -449,6 +459,39 @@ assert len(args.file) == 1
 ll_path = args.file[0]
 module = Module.parse_file(ll_path)
 
+def flatten(container: list) -> list:
+    acc = list()
+    for e in container:
+        if type(e) == list:
+            acc.extend(flatten(e))
+        else:
+            acc.append(e)
+    return acc
+
+def malloc_has_corresponding_free_pred(path: list[Block]) -> bool:
+    # TODO: Currently only supports one malloc call.
+
+    # permit path if it is not exiting the function yet
+    if not path[-1].returns:
+        return True
+
+    # find any mallocs
+    mallocs = flatten(list(map(lambda block: block.calls('malloc'), path)))
+    frees = flatten(list(map(lambda block: block.calls('free'), path)))
+
+    # TODO: Only handles single malloc/free
+    assert len(mallocs) in [0, 1]
+    assert len(frees) in [0, 1]
+
+    if len(mallocs) == 0:
+        return True
+    if len(frees) == 0:
+        # malloc without corresponding free
+        return False
+
+    # TOdO: This completely ignores the vlaues that are actually freeed.....
+    return True
+
 for fn in module.function_definitions:
     for blk in fn.blocks:
         continue
@@ -456,7 +499,7 @@ for fn in module.function_definitions:
     def pred(path: list[Block]) -> bool:
         return True
     
-    eng = ExecutionEngine(fn, pred)
+    eng = ExecutionEngine(fn, malloc_has_corresponding_free_pred)
     eng.run()
     
 
