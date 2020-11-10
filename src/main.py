@@ -7,6 +7,7 @@ from pysmt.typing import *
 import sys
 import re
 import argparse
+# import alg
 
 class Variable:
     target_data = llvm.create_target_data('')
@@ -145,7 +146,7 @@ class Operand:
                 return BOOL
             else:
                 return BVType(bits)
-
+            
     @staticmethod
     def make_smtval_from_smttype(val: int, smt_type: PySMTType) -> pysmt.formula:
         if smt_type.is_bool_type():
@@ -460,7 +461,14 @@ for fn in module.function_definitions:
     print('formula (w/o defs):', formula)
     formula = And(fn.define_formula_variables(formula), formula)
     print('formula (w/ defs):', formula)
-    
+
+    for block in fn.blocks:
+        for inst in block.llvm_blk.instructions:
+            print('inst:', inst)
+            for op in inst.operands:
+                print('op:', op)
+
+        
     
     with Solver() as solver:
         solver.add_assertion(formula)

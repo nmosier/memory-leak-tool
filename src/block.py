@@ -81,8 +81,7 @@ class Variable(Value):
         self.name = name
         self.type = Type(llvm_val.type)
         self.symbol = Symbol('v_' + self.name, self.type.pysmt_type)
-
-        # TODO: Get definition constraint
+        print('created variable {}'.format(self.symbol))
 
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef):
@@ -104,22 +103,17 @@ class Variable(Value):
     def from_func(llvm_decl: llvm.ValueRef):
         # TODO: possible name collisions with global variables
         return Variable(llvm_decl, llvm_decl.name)
-
-    def _get_pysmt_formula(self) -> pysmt.formula:
-        if self.llvm_val.is_argument:
-            return TRUE()
-        assert self.llvm_val.is_instruction
-        llvm_inst = self.llvm_val
-        inst_str = str(inst)
-        # TODO
-        assert False
     
 class Immediate(Value):
     def __init__(self, llvm_op: llvm.ValueRef):
         Value.__init__(self, llvm_op)
         llvm_op_str = str(llvm_op)
         print('Immediate:', llvm_op_str)
-        self.imm = int(llvm_op_str.split()[1])
+        val_str = llvm_op_str.split()[1]
+        if val_str == 'null':
+            self.imm = 0
+        else:
+            self.imm = int(llvm_op_str.split()[1])
         self.type = Type(llvm_op.type)
         self.pysmt_formula = self._get_pysmt_formula()
 
@@ -158,13 +152,21 @@ class Operand(Value):
             self.kind = Operand.Kind.IMMEDIATE
             self.value = Immediate(llvm_op)
 
-        
+    def formula(self, assignments: dict) -> pysmt.formula:
+        if self.kind == Operand.Kind.VARIABLE:
+            print('formula:', self.value.llvm_val)
+            return assignments[self.value]
+        elif self.kind == Operand.Kind.IMMEDIATE:
+            return self.value.pysmt_formula
+        else:
+            assert False
 
-    
 class Instruction(Value):
     def __init__(self, llvm_inst: llvm.ValueRef, str2var: dict, str2blk: dict):
         Value.__init__(self, llvm_inst)
+        self.opcode = llvm_inst.opcode
         llvm_inst_str = str(llvm_inst)
+        self.toks = llvm_inst_str.split()
         if llvm_inst_str in str2var:
             # is variable definition
             self.is_variable_definition = True
@@ -176,12 +178,79 @@ class Instruction(Value):
         # operands
         self.operands = list(map(lambda llvm_op: Operand(llvm_op, str2var, str2blk),
                                  self.llvm_val.operands))
-    
+
+    # path: dictionary from blocks -> info
+    # assignments: dictionary from Variable -> pysmt.formula
+    def apply(self, path: list, assignments: dict, store):
+        d = {'store': self._store,
+             'icmp':  self._icmp,
+             'load':  self._load,
+             'phi':   self._phi,
+             'alloca':self._alloca,
+             }
+        d[self.opcode](path, assignments, store)
+        
+    def _store(self, path: list, assignments: dict, store):
+        dst = self.operands[1]
+        val = self.operands[0]
+        assert dst.value.type.is_pointer
+        store.store(dst.value, val.formula(assignments))
+
+    def _load(self, path: list, assignments: dict, store):
+        src = self.operands[0]
+        assert src.kind == Operand.Kind.VARIABLE
+        load_formula = store.load(src.value)
+        print('load_formula:', load_formula)
+        def_formula = Equals(self.defined_variable.symbol, load_formula)
+        assignments[self.defined_variable] = load_formula
+        path[-1][1].append(def_formula)
+
+    def _alloca(self, path: list, assigments: dict, store):
+        assignments[self.defined_variable] = TRUE()
+        store.alloc(self.defined_variable)
+
+    def _icmp(self, path: list, assignments: dict, store):
+        cond = self.toks[3]
+        formulas = {'eq': Equals,
+                    'ne': NotEquals,
+                    'ugt': BVUGT,
+                    'uge': BVUGE,
+                    'ult': BVULT,
+                    'ule': BVULE,
+                    'sgt': BVSGT,
+                    'sge': BVSGE,
+                    'slt': BVSLT,
+                    'sle': BVSLE
+        }
+        atoms = list(map(lambda op: op.formula(assignments), self.operands))
+        icmp_formula = formulas[cond](*atoms)
+        def_formula = Iff(icmp_formula, self.defined_variable.symbol)
+        assignments[self.defined_variable] = icmp_formula
+        path[-1][1].append(def_formula)
+
+    def _phi(self, path: list, assignments: dict, store):
+        # find branches (2nd of pairs)
+        labels = re.findall('%\w+\s*\]', str(self.llvm_val))
+        labels = list(map(lambda label: re.findall('\w+', label), labels))
+        # get blocks from labels
+        assert len(labels) == len(self.operands)
+        for (op, label) in zip(self.operands, labels):
+            if label == path[-1][0].name:
+                def_formula = Equals(op.formula(assignments), self.symbol)
+                path[-1][1].append(def_formula)
+                break
+                
 class Block(Value):
     def __init__(self, llvm_blk: llvm.ValueRef, str2var: dict):
         Value.__init__(self, llvm_blk)
         self.predecessors = list() # populated later
-
+        # set the name
+        re_name = re.match('\d+', str(llvm_blk))
+        if re_name == None:
+            self.name = str(len(list(llvm_blk.function.arguments)))
+        else:
+            self.name = re_name
+        
     def init1(self, str2var: dict, str2blk: dict):
         self.successors = Block._get_successors(self.llvm_val, str2var, str2blk)
         self.instructions = list(map(lambda llvm_inst: Instruction(llvm_inst, str2var, str2blk),
@@ -214,6 +283,7 @@ class Type:
     
     def __init__(self, llvm_type: llvm.TypeRef):
         self.llvm_type = llvm_type
+        self.is_pointer = self.llvm_type.is_pointer
         # get bitwidth and pysmt_type
         if llvm_type.is_pointer:
             self.bitwidth = Type.target_data.get_abi_size(llvm_type) * 8
@@ -229,6 +299,39 @@ class Type:
         else:
             self.pysmt_type = BVType(self.bitwidth)
 
+class SymbolicStore:
+    def __init__(self, fn: Function):
+        self.fn = fn
+        self.tab = dict()
+
+    def alloc(self, var: Variable):
+        assert not var in self.tab
+        self.tab[var] = None
+
+    def store(self, var: Variable, val: pysmt.formula):
+        assert var in self.tab
+        self.tab[var] = val
+
+    def load(self, var: Variable) -> pysmt.formula:
+        assert var in self.tab
+        return self.tab[var]
+
+class ExecutionEngine:
+    def __init__(self, fn: Function):
+        self.fn = fn
+        self.symstore = SymbolicStore(fn)
+        # self.path type: [(block: Block, formula: pysmt.formula)],
+        # where block is component of path and formula is the symbolic expression that must be true
+        # to transition from previous block to this block (for the first block, it is simply 'True')
+        self.path = list()
+        # TODO
+
+    def run(self, steps):
+        start_blkname = str(len(list(fn.arguments)))
+        start_blk = fn.blkname_to_block(start_blkname)
+        self.path.append((start_blk, TRUE)) # add first block
+
+        # TODO
 
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1)
@@ -246,3 +349,15 @@ module = Module.parse_file(ll_path)
 for fn in module.function_definitions:
     for blk in fn.blocks:
         continue
+
+    path = list()
+    path.append((fn.blocks[0], []))
+
+    store = SymbolicStore(fn)
+    assignments = dict(map(lambda arg: (arg, arg.symbol), fn.arguments))
+    for inst in fn.blocks[0].instructions[:-1]:
+        inst.apply(path, assignments, store)
+
+    print(path)
+
+
