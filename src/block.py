@@ -413,31 +413,42 @@ class ExecutionEngine:
                 constraints.append(constraint)
         formula = And(*constraints)
 
+        print('=================')
+        print('path:', list(map(lambda pair: pair[0].name, path)))
+        print('formula:', formula)
+
+        retv = True
+        
         with Solver() as solver:
             solver.add_assertion(formula)
-            print('formula:', formula)
-            res = solver.solve()
-            if res:
-                print('SAT')
+            res_reachability = solver.solve()
+
+            if res_reachability == None:
+                print('UNREACHABLE')
+                retv = False
+            else:
                 model = solver.get_model()
                 values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
-                # print(values)
-                is_sat = True
-            else:
-                print('UNSAT')
-                is_sat = False
+                print('REACHABLE:', values)
+            
+                solver.push()
+                self.pred(list(map(lambda p: p[0], path)), None, solver)
+                res_correctness = solver.solve()
 
-        permitted = self.pred(list(map(lambda p: p[0], path)))
-        is_violation = is_sat and not permitted # is_violation := is_sat => permitted
-        terminate_path = is_violation or not is_sat
-        if is_violation:
-            print('=================')
-            print('VIOLATION')
-            print('path:', list(map(lambda pair: pair[0].name, path)))
-            print('model:', values)
-            print('=================')
+                if res_correctness:
+                    model = solver.get_model()
+                    values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
+                    print('INCORRECT', values)
+                    retv = False
+                else:
+                    print('CORRECT')
 
-        return not terminate_path
+                solver.pop()
+
+        print('=================')
+        
+        # return not is_sat
+        return True
         
     def run(self):
         # start_blkname = str(len(list(self.fn.arguments)))
@@ -468,12 +479,13 @@ def flatten(container: list) -> list:
             acc.append(e)
     return acc
 
-def malloc_has_corresponding_free_pred(path: list[Block]) -> bool:
+def malloc_has_corresponding_free_pred(path: list[Block], state, solver: Solver):
     # TODO: Currently only supports one malloc call.
 
     # permit path if it is not exiting the function yet
     if not path[-1].returns:
-        return True
+        solver.add_assertion(FALSE())
+        return
 
     # find any mallocs
     mallocs = flatten(list(map(lambda block: block.calls('malloc'), path)))
@@ -484,13 +496,23 @@ def malloc_has_corresponding_free_pred(path: list[Block]) -> bool:
     assert len(frees) in [0, 1]
 
     if len(mallocs) == 0:
-        return True
+        solver.add_assertion(FALSE())
+        return
     if len(frees) == 0:
         # malloc without corresponding free
-        return False
+        print('detected malloc without corresponding free')
+        solver.add_assertion(TRUE())
+        return
 
-    # TOdO: This completely ignores the vlaues that are actually freeed.....
-    return True
+    malloc = mallocs[0]
+    free = frees[0]
+
+    solver.add_assertion(FALSE())
+
+    # make sure malloc and free to same value
+    # TODO: Need to have some kind of callback to query the solver.
+    # TODO: Need some callback state as well. 
+    # TODO: This completely ignores the vlaues that are actually freeed.....
 
 for fn in module.function_definitions:
     for blk in fn.blocks:
@@ -502,5 +524,3 @@ for fn in module.function_definitions:
     eng = ExecutionEngine(fn, malloc_has_corresponding_free_pred)
     eng.run()
     
-
-
