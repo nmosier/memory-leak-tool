@@ -8,6 +8,7 @@ import re
 import argparse
 from enum import Enum, auto
 from copy import copy
+import math
 
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
@@ -81,7 +82,10 @@ class Variable(Value):
         self.name = name
         self.type = Type(llvm_val.type)
         self.symbol = Symbol('v_' + self.name, self.type.pysmt_type)
-
+        
+    def __repr__(self):
+        return '{{.name = {}, .type = {}, .symbol = {}}}'.format(self.name, self.type, self.symbol)
+        
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef):
         # name
@@ -150,6 +154,9 @@ class Operand(Value):
             self.kind = Operand.Kind.IMMEDIATE
             self.value = Immediate(llvm_op)
 
+    def __repr__(self) -> str:
+        return '{{.kind = {}, .value = {}}}'.format(self.kind, self.value)
+
     def formula(self, assignments: dict) -> pysmt.formula:
         if self.kind == Operand.Kind.VARIABLE:
             return assignments[self.value]
@@ -185,6 +192,8 @@ class Instruction(Value):
              'phi':   self._phi,
              'alloca':self._alloca,
              'call':  self._call,
+             'getelementptr': self._getelementptr,
+             'sext': self._sext,
              }
         d[self.opcode](path, assignments, store)
         
@@ -250,8 +259,49 @@ class Instruction(Value):
             
         if fn == 'malloc':
             assignments[self.defined_variable] = self.defined_variable.symbol
+
+    def _getelementptr(self, path: list, assignments: dict, store):
+        baseptr = self.operands[0]
+        assert baseptr.value.type.is_pointer
+        baseptr_bits = baseptr.value.type.bitwidth
+        formula = baseptr.formula(assignments)
+
+        assert len(self.operands) == 2
         
-                
+        # get index value
+        index = self.operands[1]
+        index_formula = index.formula(assignments)
+        index_bits = index.value.type.bitwidth
+        if index_bits > baseptr_bits:
+            # extract lower bits from index formula
+            index_formula = BVExtract(index_formula, end=(baseptr_bits - 1))
+        elif index_bits < baseptr_bits:
+            index_formula = BVZExt(index_formula, baseptr_bits - index_bits)
+
+        pointee_bits = baseptr.value.type.pointee().bitwidth
+        assert pointee_bits % 8 == 0
+        pointee_bytes = pointee_bits / 8
+        pointee_bytes_log2 = math.log(pointee_bytes, 2)
+        if pointee_bytes_log2 > 0:
+            index_formula = BVExtract(index_formula,
+                                      end=(index_formula.bv_width - pointee_bytes_log2 - 1))
+            index_formula = BVConcat(index_formula, BVZero(pointee_bytes_log2))
+
+        formula = BVAdd(formula, index_formula)
+        assignments[self.defined_variable] = formula
+        def_formula = Equals(formula, self.defined_variable.symbol)
+        path[-1][1].append(def_formula)
+
+    def _sext(self, path: list, assignments: dict, store):
+        dst_bits = self.defined_variable.type.bitwidth
+        src = self.operands[0]
+        src_bits = src.value.type.bitwidth
+        assert dst_bits >= src_bits
+        sext_formula = BVSExt(src.formula(assignments), dst_bits - src_bits)
+        def_formula = Equals(sext_formula, self.defined_variable.symbol)
+        assignments[self.defined_variable] = sext_formula
+        path[-1][1].append(def_formula)
+        
 class Block(Value):
     def __init__(self, llvm_blk: llvm.ValueRef, str2var: dict):
         Value.__init__(self, llvm_blk)
@@ -322,6 +372,10 @@ class Type:
         else:
             self.pysmt_type = BVType(self.bitwidth)
 
+    def __repr__(self) -> str:
+        return '{{.llvm_type = {}, .is_pointer = {}, .bitwidth = {}, .pysmt_type = {}}}'.format(
+            self.llvm_type, self.is_pointer, self.bitwidth, self.pysmt_type)
+
     def value(self, val: int) -> pysmt.formula:
         if self.pysmt_type.is_bool_type():
             d = {1: TRUE(), 0: FALSE()}
@@ -331,6 +385,10 @@ class Type:
             return BV(val, self.bitwidth)
         else:
             assert False
+
+    def pointee(self):
+        assert self.is_pointer
+        return Type(self.llvm_type.element_type)
 
 class SymbolicStore:
     def __init__(self, fn: Function):
@@ -386,15 +444,15 @@ class ExecutionEngine:
         # add this block to path
         path.append((block, list()))
 
+        # apply instructions 
+        self.run_block(block, path, assignments, store)
+        
         # Is this point reachable?
-        check_res = self.check(path)
+        check_res = self.check(path, assignments)
 
         if not check_res:
             return
 
-        # apply instructions 
-        self.run_block(block, path, assignments, store)
-        
         # recurse on branches
         for suc_blk in block.successors:
             suc_pred = block.successors[suc_blk]
@@ -403,7 +461,7 @@ class ExecutionEngine:
             del path[-1][1][-1]
 
     # returns whether to continue
-    def check(self, path: list) -> bool: 
+    def check(self, path: list, assignments: dict) -> bool: 
         print('checking path reachability...')
         print('path:', list(map(lambda pair: pair[0].name, path)))
         
@@ -432,7 +490,7 @@ class ExecutionEngine:
                 print('REACHABLE:', values)
             
                 solver.push()
-                self.pred(list(map(lambda p: p[0], path)), None, solver)
+                self.pred(list(map(lambda p: p[0], path)), assignments, None, solver)
                 res_correctness = solver.solve()
 
                 if res_correctness:
@@ -479,7 +537,7 @@ def flatten(container: list) -> list:
             acc.append(e)
     return acc
 
-def malloc_has_corresponding_free_pred(path: list[Block], state, solver: Solver):
+def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict, state, solver: Solver):
     # TODO: Currently only supports one malloc call.
 
     # permit path if it is not exiting the function yet
@@ -507,7 +565,10 @@ def malloc_has_corresponding_free_pred(path: list[Block], state, solver: Solver)
     malloc = mallocs[0]
     free = frees[0]
 
-    solver.add_assertion(FALSE())
+    print('free.operands[0] = {}'.format(free.operands[0]))
+    print('assignments = {}'.format(assignments))
+    solver.add_assertion(NotEquals(malloc.defined_variable.symbol,
+                                   free.operands[0].formula(assignments)))
 
     # make sure malloc and free to same value
     # TODO: Need to have some kind of callback to query the solver.
