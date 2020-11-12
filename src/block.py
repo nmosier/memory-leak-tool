@@ -425,10 +425,27 @@ class SymbolicStore:
         assert var in self.tab
         return self.tab[var]
 
+
+def flatten(container: list) -> list:
+    acc = list()
+    for e in container:
+        if type(e) == list:
+            acc.extend(flatten(e))
+        else:
+            acc.append(e)
+    return acc
+
+def path_get_calls(path: list[Block], *args) -> list[Instruction]:
+    t = tuple(map(lambda name: flatten(list(map(lambda blk: blk.calls(name), path))), args))
+    return t[0] if len(t) == 1 else t
+
+    
 class ExecutionEngine:
-    def __init__(self, fn: Function, preds: list):
+    def __init__(self, fn: Function, preds: list, open_fn, close_fn):
         self.fn = fn
         self.preds = preds
+        self.open_fn = open_fn
+        self.close_fn = close_fn
         # self.path type: [(block: Block, formula: pysmt.formula)],
         # where block is component of path and formula is the symbolic expression that must be true
         # to transition from previous block to this block (for the first block, it is simply 'True')
@@ -475,8 +492,6 @@ class ExecutionEngine:
 
     # returns whether to continue
     def check(self, path: list, assignments: dict) -> bool: 
-        print('checking path reachability...')
-        print('path:', list(map(lambda pair: pair[0].name, path)))
         
         constraints = list()
         for pair in path:
@@ -503,27 +518,45 @@ class ExecutionEngine:
                 print('REACHABLE:', values)
             
                 solver.push()
-                correctness_formula = FALSE() # if evaluates to true, then incorrect
-                path_blks = list(map(lambda p: p[0], path))
-                correctness_formula = Or(*map(lambda pred: pred(path_blks, assignments, None),
-                                              self.preds))
-                solver.add_assertion(correctness_formula)
-                res_correctness = solver.solve()
 
-                if res_correctness:
-                    model = solver.get_model()
-                    values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
-                    print('INCORRECT', values)
-                    retv = False
-                else:
-                    print('CORRECT')
+                # r.v. distinctness formula
+                path_blks = list(map(lambda p: p[0], path))
+                distinctness_formula_close = AllDifferent(
+                    *map(lambda i: i.operands[0].formula(assignments),
+                         path_get_calls(path_blks, self.close_fn)))
+                distinctness_formula_open = AllDifferent(
+                    *map(lambda i: i.defined_variable.symbol,
+                         path_get_calls(path_blks, self.open_fn)))
+                
+                solver.add_assertion(distinctness_formula_open)
+
+                correctness_formulas = list(map(lambda pred: pred(path_blks, assignments, None),
+                                              self.preds))
+                correctness_formulas.append(Not(distinctness_formula_close))
+
+                retv = self.check_correctness_formulas(solver, correctness_formulas)
 
                 solver.pop()
 
         print('=================')
         
         # return not is_sat
-        return True
+        return retv
+
+    def check_correctness_formulas(self, solver, formulas: list[pysmt.formula]) -> bool:
+        retv = True
+        for formula in formulas:
+            solver.push()
+            solver.add_assertion(formula)
+            if solver.solve():
+                model = solver.get_model()
+                values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
+                print('INCORRECT', values)
+                retv = False
+            solver.pop()
+            if not retv:
+                break
+        return retv
         
     def run(self):
         # start_blkname = str(len(list(self.fn.arguments)))
@@ -532,6 +565,19 @@ class ExecutionEngine:
         assignments = dict(map(lambda arg: (arg, arg.symbol), fn.arguments))
         self.run_rec(start_blk, list(), assignments, SymbolicStore(self.fn))
 
+class FunctionModel:
+    # rv_valid: callback that returns pysmt.formula determining wether r.v. of function call valid
+    def __init__(self, name: str):
+        self.name = name
+
+class TwoCallVerifier:
+    def __init__(self, open_fn, close_fn):
+        preds = [double_free_pred, malloc_has_corresponding_free_pred, free_unallocated_ptr_pred]
+        self.eng = ExecutionEngine(fn, preds, open_fn, close_fn)
+
+    def run(self):
+        self.eng.run()
+        
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1)
 parser.add_argument('-f', '--funcs', type=str, default='malloc,free')
@@ -545,47 +591,44 @@ assert len(args.file) == 1
 ll_path = args.file[0]
 module = Module.parse_file(ll_path)
 
-def flatten(container: list) -> list:
-    acc = list()
-    for e in container:
-        if type(e) == list:
-            acc.extend(flatten(e))
-        else:
-            acc.append(e)
-    return acc
 
-def path_get_calls(path: list[Block], *args) -> list[Instruction]:
-    t = tuple(map(lambda name: flatten(list(map(lambda blk: blk.calls(name), path))), args))
-    return t[0] if len(t) == 1 else t
+def double_free_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
+    (mallocs, frees) = path_get_calls(path, 'malloc', 'free')
+    
+    # TODO: Ensure all mallocs return different values
+    malloc_uniqueness_formula = AllDifferent(*map(lambda m: m.defined_variable.symbol, mallocs))
+
+    # ensure all frees different
+    free_uniqueness_formula = Not(AllDifferent(*map(lambda f: f.operands[0].formula(assignments),
+                                                frees)))
+
+    return And(malloc_uniqueness_formula, free_uniqueness_formula)
 
 def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict,
                                        state) -> pysmt.formula:
-    # TODO: Currently only supports one malloc call.
-
-    # permit path if it is not exiting the function yet
+    # permit path if it hasn't reached a return instruction
     if not path[-1].returns:
-        return FALSE()
+        return FALSE();
 
-    # find any mallocs
+    # find mallocs and frees
     (mallocs, frees) = path_get_calls(path, 'malloc', 'free')
-
-    # TODO: Only handles single malloc/free
-    assert len(mallocs) in [0, 1]
-    assert len(frees) in [0, 1]
-    
+    if len(mallocs) != len(frees):
+        print('calls to malloc() not equal to calls to free()')
+        return TRUE()
     if len(mallocs) == 0:
         return FALSE()
-    if len(frees) == 0:
-        # malloc without corresponding free
-        print('detected malloc without corresponding free')
-        return TRUE()
 
-    malloc = mallocs[0]
-    free = frees[0]
+    # TODO: Ensure all mallocs return different values.
+    uniqueness_formula = AllDifferent(*map(lambda m: m.defined_variable.symbol, mallocs))
+    
+    # ensure 1:1 correspondence to mallocs and frees
+    def malloc_equals_exactly_one_free(malloc: Instruction) -> pysmt.formula:
+        return ExactlyOne(*map(lambda free: Equals(malloc.defined_variable.symbol,
+                                                   free.operands[0].formula(assignments)), frees))
 
-    print('free.operands[0] = {}'.format(free.operands[0]))
-    print('assignments = {}'.format(assignments))
-    return NotEquals(malloc.defined_variable.symbol, free.operands[0].formula(assignments))
+    pigeonhole_formula = Not(And(*map(malloc_equals_exactly_one_free, mallocs)))
+    return And(uniqueness_formula, pigeonhole_formula)
+
 
 def free_unallocated_ptr_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
     (mallocs, frees) = path_get_calls(path, 'malloc', 'free')
@@ -601,7 +644,15 @@ for fn in module.function_definitions:
 
     def pred(path: list[Block]) -> bool:
         return True
-    
-    eng = ExecutionEngine(fn, [malloc_has_corresponding_free_pred, free_unallocated_ptr_pred])
-    eng.run()
+
+    preds = [malloc_has_corresponding_free_pred,
+             free_unallocated_ptr_pred,
+             double_free_pred,
+             ]
+    open_fn = FunctionModel('malloc')
+    close_fn = FunctionModel('free')
+    # eng = ExecutionEngine(fn, preds, open_fn, close_fn)
+    # eng.run()
+    verifier = TwoCallVerifier(open_fn, close_fn)
+    verifier.run()
     
