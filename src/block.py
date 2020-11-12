@@ -572,11 +572,52 @@ class FunctionModel:
 
 class TwoCallVerifier:
     def __init__(self, open_fn, close_fn):
-        preds = [double_free_pred, malloc_has_corresponding_free_pred, free_unallocated_ptr_pred]
+        preds = [self.double_close_pred,
+                 self.opens_have_close_pred,
+                 self.closes_have_open_pred,
+        ]
+        self.open_fn = open_fn
+        self.close_fn = close_fn
         self.eng = ExecutionEngine(fn, preds, open_fn, close_fn)
 
     def run(self):
         self.eng.run()
+
+    def get_calls(self, path: list[Block]) -> tuple:
+        return path_get_calls(path, self.open_fn.name, self.close_fn.name)
+        
+    def double_close_pred(self, path: list[Block], assignments: dict, state) -> pysmt.formula:
+        (opens, closes) = self.get_calls(path)
+        return Not(AllDifferent(*map(lambda c: c.operands[0].formula(assignments), closes)))
+
+    def opens_neq_closes_pred(self, path, assignments, state):
+        if path[-1].returns:
+            (opens, closes) = self.get_calls(path)
+            if len(opens) == len(closes):
+                return FALSE()
+            else:
+                return TRUE()
+        else:
+            return FALSE()
+        
+    def opens_have_close_pred(self, path: list[Block], assignments: dict, state) -> pysmt.formula:
+        if not path[-1].returns:
+            return FALSE()
+        
+        (opens, closes) = self.get_calls(path)
+
+        def open_has_close(open: Instruction) -> pysmt.formula:
+            return Or(*map(lambda close: Equals(open.defined_variable.symbol,
+                                                close.operands[0].formula(assignments)), closes))
+        return Not(And(*map(open_has_close, opens)))
+
+    def closes_have_open_pred(self, path, assignments, state):
+        (opens, closes) = self.get_calls(path)
+        def close_has_open(close: Instruction) -> pysmt.formula:
+            return Or(*map(lambda open: Equals(open.defined_variable.symbol,
+                                               close.operands[0].formula(assignments)), opens))
+        return Not(And(*map(close_has_open, closes)))
+        
         
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1)
@@ -592,20 +633,13 @@ ll_path = args.file[0]
 module = Module.parse_file(ll_path)
 
 
-def double_free_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
+def double_close_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
     (mallocs, frees) = path_get_calls(path, 'malloc', 'free')
-    
-    # TODO: Ensure all mallocs return different values
-    malloc_uniqueness_formula = AllDifferent(*map(lambda m: m.defined_variable.symbol, mallocs))
-
-    # ensure all frees different
     free_uniqueness_formula = Not(AllDifferent(*map(lambda f: f.operands[0].formula(assignments),
                                                 frees)))
+    return free_uniqueness_formula
 
-    return And(malloc_uniqueness_formula, free_uniqueness_formula)
-
-def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict,
-                                       state) -> pysmt.formula:
+def open_has_close_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
     # permit path if it hasn't reached a return instruction
     if not path[-1].returns:
         return FALSE();
@@ -618,16 +652,13 @@ def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict,
     if len(mallocs) == 0:
         return FALSE()
 
-    # TODO: Ensure all mallocs return different values.
-    uniqueness_formula = AllDifferent(*map(lambda m: m.defined_variable.symbol, mallocs))
-    
     # ensure 1:1 correspondence to mallocs and frees
     def malloc_equals_exactly_one_free(malloc: Instruction) -> pysmt.formula:
         return ExactlyOne(*map(lambda free: Equals(malloc.defined_variable.symbol,
                                                    free.operands[0].formula(assignments)), frees))
 
     pigeonhole_formula = Not(And(*map(malloc_equals_exactly_one_free, mallocs)))
-    return And(uniqueness_formula, pigeonhole_formula)
+    return pigeonhole_formula
 
 
 def free_unallocated_ptr_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
@@ -645,14 +676,8 @@ for fn in module.function_definitions:
     def pred(path: list[Block]) -> bool:
         return True
 
-    preds = [malloc_has_corresponding_free_pred,
-             free_unallocated_ptr_pred,
-             double_free_pred,
-             ]
     open_fn = FunctionModel('malloc')
     close_fn = FunctionModel('free')
-    # eng = ExecutionEngine(fn, preds, open_fn, close_fn)
-    # eng.run()
     verifier = TwoCallVerifier(open_fn, close_fn)
     verifier.run()
     
