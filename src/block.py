@@ -85,21 +85,21 @@ class Variable(Value):
         
     def __repr__(self):
         return '{{.name = {}, .type = {}, .symbol = {}}}'.format(self.name, self.type, self.symbol)
-        
+
     @staticmethod
     def from_inst(llvm_inst: llvm.ValueRef):
         # name
         llvm_inst_str = str(llvm_inst)
         full_name = re.search('%\w+', llvm_inst_str).group(0)
         name = full_name[1:]
-        return Variable(llvm_inst, name)
+        return Variable(llvm_inst, llvm_inst.block.function.name + '_' + name)
 
     @staticmethod
     def from_arg(llvm_arg: llvm.ValueRef):
         # name
         llvm_arg_str = str(llvm_arg)
         name = llvm_arg_str.split()[1][1:]
-        return Variable(llvm_arg, name)
+        return Variable(llvm_arg, llvm_arg.function.name + '_' + name)
 
     # works with both declarations and definitions
     @staticmethod
@@ -114,17 +114,26 @@ class Immediate(Value):
         val_str = llvm_op_str.split()[1]
         if val_str == 'null':
             self.imm = 0
+        elif val_str == 'false':
+            self.imm = 0
+        elif val_str == 'true':
+            self.imm = 1
+        elif val_str == 'inttoptr':
+            self.imm = int(llvm_op_str.split()[3])
         else:
             self.imm = int(llvm_op_str.split()[1])
         self.type = Type(llvm_op.type)
         self.pysmt_formula = self._get_pysmt_formula()
 
+    def __repr__(self) -> str:
+        return '{{.imm = {}, .type = {}}}'.format(self.imm, self.type)
+        
     def _get_pysmt_formula(self):
         if self.type.pysmt_type.is_bool_type():
             m = {0: FALSE, 1: TRUE}
             return m[self.imm]
         elif self.type.pysmt_type.is_bv_type():
-            return BV(self.imm, self.type.pysmt_type.width)
+            return (BV if self.imm >= 0 else SBV)(self.imm, self.type.pysmt_type.width)
         else:
             assert False
         
@@ -196,11 +205,21 @@ class Instruction(Value):
              'sext': self._sext,
              'inttoptr': self._inttoptr,
              'bitcast': self._nop,
+             'and': self._binop,
+             'or': self._binop,
              }
         d[self.opcode](path, assignments, store)
 
     def _nop(self, path: list, assignments: dict, store):
         assignments[self.defined_variable] = self.operands[0].formula(assignments)
+
+    def _binop(self, path, assignments, store):
+        m = {'and': BVAnd,
+             'or': BVOr,
+             }
+        formula = m[self.opcode](*map(lambda op: op.formula(assignments), self.operands))
+        assignments[self.defined_variable] = formula
+        path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
         
     def _store(self, path: list, assignments: dict, store):
         dst = self.operands[1]
@@ -261,9 +280,7 @@ class Instruction(Value):
             return
 
         rettype = self.defined_variable.type
-            
-        if fn == 'malloc':
-            assignments[self.defined_variable] = self.defined_variable.symbol
+        assignments[self.defined_variable] = self.defined_variable.symbol
 
     def _getelementptr(self, path: list, assignments: dict, store):
         baseptr = self.operands[0]
@@ -353,7 +370,6 @@ class Block(Value):
             assert len(operand_strs) == 3
             var = str2var[operand_strs[0]]
             assert var.type.pysmt_type == BOOL
-            print('operands_strs[1] = {}'.format(operand_strs[1]))
             # NOTE: Had to swap these for some strange reason.
             return {str2blk[operand_strs[2]]: var.symbol,
                     str2blk[operand_strs[1]]: Not(var.symbol)}
