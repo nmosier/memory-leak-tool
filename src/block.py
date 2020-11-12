@@ -567,16 +567,18 @@ class ExecutionEngine:
 
 class FunctionModel:
     # rv_valid: callback that returns pysmt.formula determining wether r.v. of function call valid
-    def __init__(self, name: str):
+    def __init__(self, name: str, valid):
         self.name = name
+        self.valid = valid
 
 class TwoCallVerifier:
     def __init__(self, open_fn, close_fn):
         preds = {self.double_close_pred: 'double close',
                  self.opens_have_close_pred: 'open w/o close',
                  self.closes_have_open_pred: 'close w/o open',
+                 self.closes_valid_arg_pred: 'invalid argument to close',
         }
-        assumptions = [self.opens_distinct_assumption]
+        assumptions = [self.opens_distinct_assumption, self.opens_valid_rv_assumption]
         self.open_fn = open_fn
         self.close_fn = close_fn
         self.eng = ExecutionEngine(fn, preds, assumptions, open_fn, close_fn)
@@ -591,16 +593,6 @@ class TwoCallVerifier:
         (opens, closes) = self.get_calls(path)
         return Not(AllDifferent(*map(lambda c: c.operands[0].formula(assignments), closes)))
 
-    def opens_neq_closes_pred(self, path, assignments, state):
-        if path[-1].returns:
-            (opens, closes) = self.get_calls(path)
-            if len(opens) == len(closes):
-                return FALSE()
-            else:
-                return TRUE()
-        else:
-            return FALSE()
-        
     def opens_have_close_pred(self, path: list[Block], assignments: dict, state) -> pysmt.formula:
         if not path[-1].returns:
             return FALSE()
@@ -618,6 +610,14 @@ class TwoCallVerifier:
             return Or(*map(lambda open: EqualsOrIff(open.defined_variable.symbol,
                                                close.operands[0].formula(assignments)), opens))
         return Not(And(*map(close_has_open, closes)))
+
+    def closes_valid_arg_pred(self, path, assignments, state):
+        (opens, closes) = self.get_calls(path)
+        return Not(And(*map(lambda i: self.close_fn.valid(i, assignments), closes)))
+
+    def opens_valid_rv_assumption(self, path, assignments, state):
+        (opens, closes) = self.get_calls(path)
+        return And(*map(lambda i: self.open_fn.valid(i, assignments), opens))
         
     def opens_distinct_assumption(self, path, assignments, state):
         (opens, closes) = self.get_calls(path)
@@ -681,8 +681,15 @@ for fn in module.function_definitions:
     def pred(path: list[Block]) -> bool:
         return True
 
-    open_fn = FunctionModel('malloc')
-    close_fn = FunctionModel('free')
+    def malloc_valid_rv(inst, assignments) -> pysmt.formula:
+        return NotEquals(inst.defined_variable.symbol, BVZero(inst.defined_variable.type.bitwidth))
+
+    def free_valid_arg(inst, assignments):
+        return NotEquals(inst.operands[0].formula(assignments),
+                         BVZero(inst.operands[0].value.type.bitwidth))
+    
+    open_fn = FunctionModel('malloc', malloc_valid_rv)
+    close_fn = FunctionModel('free', free_valid_arg)
     verifier = TwoCallVerifier(open_fn, close_fn)
     verifier.run()
     
