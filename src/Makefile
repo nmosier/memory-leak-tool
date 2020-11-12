@@ -1,9 +1,15 @@
-.PHONY: test
-test:
-	./block.py ../tests/test3.ll
+LLS = $(basename $(wildcard ../tests/test*.ll))
+TESTS = $(LLS:.ll=)
 
-../tests/test%.ll:
+.PHONY: test
+test: $(TESTS)
+	echo $(TESTS)
+
+.PHONY: FORCE
+FORCE:
+
+../tests/test%.ll: FORCE
 	$(MAKE) -C ../tests $(@:../tests/%=%)
 
 test%: ../tests/test%.ll
-	./block.py $<
+	./main.py $<
