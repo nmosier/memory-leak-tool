@@ -194,6 +194,7 @@ class Instruction(Value):
              'call':  self._call,
              'getelementptr': self._getelementptr,
              'sext': self._sext,
+             'inttoptr': self._inttoptr,
              }
         d[self.opcode](path, assignments, store)
         
@@ -300,6 +301,18 @@ class Instruction(Value):
         sext_formula = BVSExt(src.formula(assignments), dst_bits - src_bits)
         def_formula = Equals(sext_formula, self.defined_variable.symbol)
         assignments[self.defined_variable] = sext_formula
+        path[-1][1].append(def_formula)
+
+    def _inttoptr(self, path: list, assignments: dict, store):
+        dst_bits = self.defined_variable.type.bitwidth
+        src_bits = self.operands[0].value.type.bitwidth
+        formula = self.operands[0].formula(assignments)
+        if dst_bits < src_bits:
+            formula = BVExtract(formula, end=(dst_bits - 1))
+        elif dst_bits > src_bits:
+            formula = BVZExt(formula, dst_bits - src_bits)
+        assignments[self.defined_variable] = formula
+        def_formula = Equals(self.defined_variable.symbol, formula)
         path[-1][1].append(def_formula)
         
 class Block(Value):
@@ -413,9 +426,9 @@ class SymbolicStore:
         return self.tab[var]
 
 class ExecutionEngine:
-    def __init__(self, fn: Function, pred):
+    def __init__(self, fn: Function, preds: list):
         self.fn = fn
-        self.pred = pred
+        self.preds = preds
         # self.path type: [(block: Block, formula: pysmt.formula)],
         # where block is component of path and formula is the symbolic expression that must be true
         # to transition from previous block to this block (for the first block, it is simply 'True')
@@ -490,7 +503,11 @@ class ExecutionEngine:
                 print('REACHABLE:', values)
             
                 solver.push()
-                self.pred(list(map(lambda p: p[0], path)), assignments, None, solver)
+                correctness_formula = FALSE() # if evaluates to true, then incorrect
+                path_blks = list(map(lambda p: p[0], path))
+                correctness_formula = Or(*map(lambda pred: pred(path_blks, assignments, None),
+                                              self.preds))
+                solver.add_assertion(correctness_formula)
                 res_correctness = solver.solve()
 
                 if res_correctness:
@@ -537,39 +554,46 @@ def flatten(container: list) -> list:
             acc.append(e)
     return acc
 
-def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict, state, solver: Solver):
+def path_get_calls(path: list[Block], *args) -> list[Instruction]:
+    t = tuple(map(lambda name: flatten(list(map(lambda blk: blk.calls(name), path))), args))
+    return t[0] if len(t) == 1 else t
+
+def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict,
+                                       state) -> pysmt.formula:
     # TODO: Currently only supports one malloc call.
 
     # permit path if it is not exiting the function yet
     if not path[-1].returns:
-        solver.add_assertion(FALSE())
-        return
+        return FALSE()
 
     # find any mallocs
-    mallocs = flatten(list(map(lambda block: block.calls('malloc'), path)))
-    frees = flatten(list(map(lambda block: block.calls('free'), path)))
+    (mallocs, frees) = path_get_calls(path, 'malloc', 'free')
 
     # TODO: Only handles single malloc/free
     assert len(mallocs) in [0, 1]
     assert len(frees) in [0, 1]
-
+    
     if len(mallocs) == 0:
-        solver.add_assertion(FALSE())
-        return
+        return FALSE()
     if len(frees) == 0:
         # malloc without corresponding free
         print('detected malloc without corresponding free')
-        solver.add_assertion(TRUE())
-        return
+        return TRUE()
 
     malloc = mallocs[0]
     free = frees[0]
 
     print('free.operands[0] = {}'.format(free.operands[0]))
     print('assignments = {}'.format(assignments))
-    solver.add_assertion(NotEquals(malloc.defined_variable.symbol,
-                                   free.operands[0].formula(assignments)))
+    return NotEquals(malloc.defined_variable.symbol, free.operands[0].formula(assignments))
 
+def free_unallocated_ptr_pred(path: list[Block], assignments: dict, state) -> pysmt.formula:
+    (mallocs, frees) = path_get_calls(path, 'malloc', 'free')
+    if len(mallocs) != 0 or len(frees) == 0:
+        return FALSE()
+    return TRUE()
+    # TODO: Doesn't work for frees to values that haven't been previously malloc'ed.
+        
     
 for fn in module.function_definitions:
     for blk in fn.blocks:
@@ -578,6 +602,6 @@ for fn in module.function_definitions:
     def pred(path: list[Block]) -> bool:
         return True
     
-    eng = ExecutionEngine(fn, malloc_has_corresponding_free_pred)
+    eng = ExecutionEngine(fn, [malloc_has_corresponding_free_pred, free_unallocated_ptr_pred])
     eng.run()
     
