@@ -195,8 +195,12 @@ class Instruction(Value):
              'getelementptr': self._getelementptr,
              'sext': self._sext,
              'inttoptr': self._inttoptr,
+             'bitcast': self._nop,
              }
         d[self.opcode](path, assignments, store)
+
+    def _nop(self, path: list, assignments: dict, store):
+        assignments[self.defined_variable] = self.operands[0].formula(assignments)
         
     def _store(self, path: list, assignments: dict, store):
         dst = self.operands[1]
@@ -208,12 +212,12 @@ class Instruction(Value):
         src = self.operands[0]
         assert src.kind == Operand.Kind.VARIABLE
         load_formula = store.load(src.value)
-        def_formula = Equals(self.defined_variable.symbol, load_formula)
+        def_formula = EqualsOrIff(self.defined_variable.symbol, load_formula)
         assignments[self.defined_variable] = load_formula
         path[-1][1].append(def_formula)
 
     def _alloca(self, path: list, assignments: dict, store):
-        assignments[self.defined_variable] = TRUE()
+        assignments[self.defined_variable] = self.defined_variable.symbol
         store.alloc(self.defined_variable)
 
     def _icmp(self, path: list, assignments: dict, store):
@@ -244,7 +248,7 @@ class Instruction(Value):
         for (op, label) in zip(self.operands, labels):
             if label == path[-2][0].name:
                 phi_formula = op.formula(assignments)
-                def_formula = Equals(self.defined_variable.symbol, phi_formula)
+                def_formula = EqualsOrIff(self.defined_variable.symbol, phi_formula)
                 assignments[self.defined_variable] = phi_formula
                 path[-1][1].append(def_formula)
                 break
@@ -290,7 +294,7 @@ class Instruction(Value):
 
         formula = BVAdd(formula, index_formula)
         assignments[self.defined_variable] = formula
-        def_formula = Equals(formula, self.defined_variable.symbol)
+        def_formula = EqualsOrIff(formula, self.defined_variable.symbol)
         path[-1][1].append(def_formula)
 
     def _sext(self, path: list, assignments: dict, store):
@@ -299,7 +303,7 @@ class Instruction(Value):
         src_bits = src.value.type.bitwidth
         assert dst_bits >= src_bits
         sext_formula = BVSExt(src.formula(assignments), dst_bits - src_bits)
-        def_formula = Equals(sext_formula, self.defined_variable.symbol)
+        def_formula = EqualsOrIff(sext_formula, self.defined_variable.symbol)
         assignments[self.defined_variable] = sext_formula
         path[-1][1].append(def_formula)
 
@@ -312,7 +316,7 @@ class Instruction(Value):
         elif dst_bits > src_bits:
             formula = BVZExt(formula, dst_bits - src_bits)
         assignments[self.defined_variable] = formula
-        def_formula = Equals(self.defined_variable.symbol, formula)
+        def_formula = EqualsOrIff(self.defined_variable.symbol, formula)
         path[-1][1].append(def_formula)
         
 class Block(Value):
@@ -510,7 +514,7 @@ class ExecutionEngine:
             solver.add_assertion(formula)
             res_reachability = solver.solve()
 
-            if res_reachability == None:
+            if not res_reachability:
                 print('UNREACHABLE')
                 retv = False
             else:
@@ -520,16 +524,11 @@ class ExecutionEngine:
             
                 solver.push()
 
-                # r.v. distinctness formula
                 path_blks = list(map(lambda p: p[0], path))
-                distinctness_formula_close = AllDifferent(
-                    *map(lambda i: i.operands[0].formula(assignments),
-                         path_get_calls(path_blks, self.close_fn)))
-                distinctness_formula_open = AllDifferent(
-                    *map(lambda i: i.defined_variable.symbol,
-                         path_get_calls(path_blks, self.open_fn)))
-                
-                solver.add_assertion(distinctness_formula_open)
+
+                # add assumptions
+                for assumption in self.assumptions:
+                    solver.add_assertion(assumption(path_blks, assignments, None))
 
                 correctness_formulas = dict(map(lambda pred: (pred(path_blks, assignments, None),
                                                               self.preds[pred]),
@@ -577,9 +576,10 @@ class TwoCallVerifier:
                  self.opens_have_close_pred: 'open w/o close',
                  self.closes_have_open_pred: 'close w/o open',
         }
+        assumptions = [self.opens_distinct_assumption]
         self.open_fn = open_fn
         self.close_fn = close_fn
-        self.eng = ExecutionEngine(fn, preds, None, open_fn, close_fn)
+        self.eng = ExecutionEngine(fn, preds, assumptions, open_fn, close_fn)
 
     def run(self):
         self.eng.run()
@@ -608,18 +608,22 @@ class TwoCallVerifier:
         (opens, closes) = self.get_calls(path)
 
         def open_has_close(open: Instruction) -> pysmt.formula:
-            return Or(*map(lambda close: Equals(open.defined_variable.symbol,
+            return Or(*map(lambda close: EqualsOrIff(open.defined_variable.symbol,
                                                 close.operands[0].formula(assignments)), closes))
         return Not(And(*map(open_has_close, opens)))
 
     def closes_have_open_pred(self, path, assignments, state):
         (opens, closes) = self.get_calls(path)
         def close_has_open(close: Instruction) -> pysmt.formula:
-            return Or(*map(lambda open: Equals(open.defined_variable.symbol,
+            return Or(*map(lambda open: EqualsOrIff(open.defined_variable.symbol,
                                                close.operands[0].formula(assignments)), opens))
         return Not(And(*map(close_has_open, closes)))
         
-        
+    def opens_distinct_assumption(self, path, assignments, state):
+        (opens, closes) = self.get_calls(path)
+        return AllDifferent(*map(lambda open: open.defined_variable.symbol, opens))
+
+    
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1)
 parser.add_argument('-f', '--funcs', type=str, default='malloc,free')
@@ -655,7 +659,7 @@ def open_has_close_pred(path: list[Block], assignments: dict, state) -> pysmt.fo
 
     # ensure 1:1 correspondence to mallocs and frees
     def malloc_equals_exactly_one_free(malloc: Instruction) -> pysmt.formula:
-        return ExactlyOne(*map(lambda free: Equals(malloc.defined_variable.symbol,
+        return ExactlyOne(*map(lambda free: EqualsOrIff(malloc.defined_variable.symbol,
                                                    free.operands[0].formula(assignments)), frees))
 
     pigeonhole_formula = Not(And(*map(malloc_equals_exactly_one_free, mallocs)))
