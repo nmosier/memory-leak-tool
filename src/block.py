@@ -570,11 +570,7 @@ def malloc_has_corresponding_free_pred(path: list[Block], assignments: dict, sta
     solver.add_assertion(NotEquals(malloc.defined_variable.symbol,
                                    free.operands[0].formula(assignments)))
 
-    # make sure malloc and free to same value
-    # TODO: Need to have some kind of callback to query the solver.
-    # TODO: Need some callback state as well. 
-    # TODO: This completely ignores the vlaues that are actually freeed.....
-
+    
 for fn in module.function_definitions:
     for blk in fn.blocks:
         continue
