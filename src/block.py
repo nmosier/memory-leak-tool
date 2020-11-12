@@ -441,9 +441,10 @@ def path_get_calls(path: list[Block], *args) -> list[Instruction]:
 
     
 class ExecutionEngine:
-    def __init__(self, fn: Function, preds: list, open_fn, close_fn):
+    def __init__(self, fn: Function, preds: list, assumptions: list, open_fn, close_fn):
         self.fn = fn
         self.preds = preds
+        self.assumptions = assumptions
         self.open_fn = open_fn
         self.close_fn = close_fn
         # self.path type: [(block: Block, formula: pysmt.formula)],
@@ -530,9 +531,9 @@ class ExecutionEngine:
                 
                 solver.add_assertion(distinctness_formula_open)
 
-                correctness_formulas = list(map(lambda pred: pred(path_blks, assignments, None),
-                                              self.preds))
-                correctness_formulas.append(Not(distinctness_formula_close))
+                correctness_formulas = dict(map(lambda pred: (pred(path_blks, assignments, None),
+                                                              self.preds[pred]),
+                                                self.preds))
 
                 retv = self.check_correctness_formulas(solver, correctness_formulas)
 
@@ -543,7 +544,7 @@ class ExecutionEngine:
         # return not is_sat
         return retv
 
-    def check_correctness_formulas(self, solver, formulas: list[pysmt.formula]) -> bool:
+    def check_correctness_formulas(self, solver, formulas) -> bool:
         retv = True
         for formula in formulas:
             solver.push()
@@ -551,7 +552,7 @@ class ExecutionEngine:
             if solver.solve():
                 model = solver.get_model()
                 values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
-                print('INCORRECT', values)
+                print('INCORRECT: {}: {}'.format(formulas[formula], values))
                 retv = False
             solver.pop()
             if not retv:
@@ -572,13 +573,13 @@ class FunctionModel:
 
 class TwoCallVerifier:
     def __init__(self, open_fn, close_fn):
-        preds = [self.double_close_pred,
-                 self.opens_have_close_pred,
-                 self.closes_have_open_pred,
-        ]
+        preds = {self.double_close_pred: 'double close',
+                 self.opens_have_close_pred: 'open w/o close',
+                 self.closes_have_open_pred: 'close w/o open',
+        }
         self.open_fn = open_fn
         self.close_fn = close_fn
-        self.eng = ExecutionEngine(fn, preds, open_fn, close_fn)
+        self.eng = ExecutionEngine(fn, preds, None, open_fn, close_fn)
 
     def run(self):
         self.eng.run()
