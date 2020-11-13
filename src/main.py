@@ -207,6 +207,7 @@ class Instruction(Value):
              'bitcast': self._nop,
              'and': self._binop,
              'or': self._binop,
+             'add': self._binop,
              }
         d[self.opcode](path, assignments, store)
 
@@ -216,6 +217,7 @@ class Instruction(Value):
     def _binop(self, path, assignments, store):
         m = {'and': BVAnd,
              'or': BVOr,
+             'add': BVAdd,
              }
         formula = m[self.opcode](*map(lambda op: op.formula(assignments), self.operands))
         assignments[self.defined_variable] = formula
@@ -522,7 +524,7 @@ class ExecutionEngine:
 
         print('=================')
         print('path:', list(map(lambda pair: pair[0].name, path)))
-        print('formula:', formula)
+        print('formula:', serialize(formula))
 
         retv = True
         
