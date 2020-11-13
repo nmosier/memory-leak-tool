@@ -106,6 +106,10 @@ class Variable(Value):
     def from_func(llvm_decl: llvm.ValueRef):
         # TODO: possible name collisions with global variables
         return Variable(llvm_decl, llvm_decl.name)
+
+    def new_symbol(self):
+        self.symbol = Symbol(self.symbol.symbol_name() + '\'', self.type.pysmt_type)
+        return self.symbol
     
 class Immediate(Value):
     def __init__(self, llvm_op: llvm.ValueRef):
@@ -195,6 +199,9 @@ class Instruction(Value):
     # path: dictionary from blocks -> info
     # assignments: dictionary from Variable -> pysmt.formula
     def apply(self, path: list, assignments: dict, store):
+        if self.defined_variable != None:
+            self.defined_variable.new_symbol()
+        
         d = {'store': self._store,
              'icmp':  self._icmp,
              'load':  self._load,
@@ -355,6 +362,21 @@ class Block(Value):
         # whether returns
         self.returns = self.instructions[-1].opcode in ['ret']
 
+    def apply(self, path: list, assignments: dict, store):
+        for inst in self.instructions[:-1]:
+            inst.apply(path, assignments, store)
+        
+        for successor in self.successors:
+            formula = self.successors[successor]
+            symbols = list(formula.get_free_variables())
+            if len(symbols) != 0:
+                assert len(symbols) == 1
+                symbol = symbols[0]
+                newf = substitute(formula, {symbol: Symbol(symbol.symbol_name() + '\'',
+                                                           get_type(symbol))})
+                self.successors[successor] = newf
+        
+
     @staticmethod
     def _get_successors(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) -> dict:
         last_inst = list(llvm_blk.instructions)[-1]
@@ -463,12 +485,14 @@ def path_get_calls(path: list[Block], *args) -> list[Instruction]:
 
     
 class ExecutionEngine:
-    def __init__(self, fn: Function, preds: list, assumptions: list, open_fn, close_fn):
+    def __init__(self, fn: Function, preds: list, assumptions: list, open_fn, close_fn,
+                 bmc: int = 10):
         self.fn = fn
         self.preds = preds
         self.assumptions = assumptions
         self.open_fn = open_fn
         self.close_fn = close_fn
+        self.bmc = bmc
         # self.path type: [(block: Block, formula: pysmt.formula)],
         # where block is component of path and formula is the symbolic expression that must be true
         # to transition from previous block to this block (for the first block, it is simply 'True')
@@ -486,8 +510,7 @@ class ExecutionEngine:
         return copy(store)
         
     def run_block(self, block: Block, path: list, assignments: dict, store: SymbolicStore):
-        for inst in block.instructions[:-1]:
-            inst.apply(path, assignments, store)
+        block.apply(path, assignments, store)
 
     def run_rec(self, block: Block, path: list, assignments: dict, store: SymbolicStore):
         path = self._copy_path(path)
@@ -506,6 +529,10 @@ class ExecutionEngine:
         if not check_res:
             return
 
+        # BMC exceeded?
+        if len(path) >= self.bmc:
+            return
+        
         # recurse on branches
         for suc_blk in block.successors:
             suc_pred = block.successors[suc_blk]
