@@ -11,3 +11,6 @@ all: $(OBJS)
 
 %.ll: %.c
 	$(CLANG) $(LLVMFLAGS) -S -o $@ $<
+
+test%: test%.ll
+	true
