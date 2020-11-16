@@ -3,7 +3,10 @@ from pysmt.typing import *
 
 from copy import copy
 
-__all__ = ["SymblicStore"]
+__all__ = ["SymbolicStore"]
+
+# type declaration of sorts
+Function = Variable = None
 
 class SymbolicStore:
     def __init__(self, fn: Function):
