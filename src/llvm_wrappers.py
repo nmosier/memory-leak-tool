@@ -1,13 +1,17 @@
 from llvmlite import binding as llvm
 #from llvmlite import ir as lc
 
-from pysmt.shortcuts import * #are both imports here necessary?
+from pysmt.shortcuts import * # are both imports here necessary?
 from pysmt.typing import *
 
 from copy import copy
 import enum
 import math
 import re # regex parsing
+
+__all__ = ["Module", "Function", "Variable", "Instruction", "Block"]
+
+SymbolicStore = None
 
 '''
 This file defines classes which are wrappers around functionality provided by
