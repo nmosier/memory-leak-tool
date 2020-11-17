@@ -250,50 +250,54 @@ class Instruction(Value):
         d = {'store': self._store,
              'icmp':  self._icmp,
              'load':  self._load,
-             'phi':   self._phi,
+             # applying a phi node requires knowledge of the previous block
+             'phi':   lambda *args: self._phi(*args, prev_blk=path[-2][0].name),
              'alloca':self._alloca,
              'call':  self._call,
              'getelementptr': self._getelementptr,
              'sext': self._sext,
              'inttoptr': self._inttoptr,
-             'bitcast': self._nop,
+             'bitcast': self._bitcast,
              'and': self._binop,
              'or': self._binop,
              'add': self._binop,
              }
-        d[self.opcode](path, assignments, store)
+        formula = d[self.opcode](assignments, store)
+        if self.defined_variable != None:
+            assert formula != None
+            assignments[self.defined_variable] = formula
+            #if formula != self.defined_variable.symbol:
+            path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
+        else:
+            assert formula == None
 
-    def _nop(self, path: list, assignments: dict, store):
-        assignments[self.defined_variable] = self.operands[0].formula(assignments)
 
-    def _binop(self, path, assignments, store):
+    def _bitcast(self, assignments: dict, store):
+        return self.operands[0].formula(assignments)
+
+    def _binop(self, assignments, store):
         m = {'and': BVAnd,
              'or': BVOr,
              'add': BVAdd,
              }
-        formula = m[self.opcode](*map(lambda op: op.formula(assignments), self.operands))
-        assignments[self.defined_variable] = formula
-        path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
+        return m[self.opcode](*map(lambda op: op.formula(assignments), self.operands))
         
-    def _store(self, path: list, assignments: dict, store):
+    def _store(self, assignments: dict, store):
         dst = self.operands[1]
         val = self.operands[0]
         assert dst.value.type.is_pointer
         store.store(dst.value, val.formula(assignments))
 
-    def _load(self, path: list, assignments: dict, store):
+    def _load(self, assignments: dict, store):
         src = self.operands[0]
         assert src.kind == Operand.Kind.VARIABLE
-        load_formula = store.load(src.value)
-        def_formula = EqualsOrIff(self.defined_variable.symbol, load_formula)
-        assignments[self.defined_variable] = load_formula
-        path[-1][1].append(def_formula)
+        return store.load(src.value)
 
-    def _alloca(self, path: list, assignments: dict, store):
-        assignments[self.defined_variable] = self.defined_variable.symbol
+    def _alloca(self, assignments: dict, store):
         store.alloc(self.defined_variable)
+        return self.defined_variable.symbol
 
-    def _icmp(self, path: list, assignments: dict, store):
+    def _icmp(self, assignments: dict, store):
         cond = self.toks[3]
         formulas = {'eq': Equals,
                     'ne': NotEquals,
@@ -307,36 +311,25 @@ class Instruction(Value):
                     'sle': BVSLE
         }
         atoms = list(map(lambda op: op.formula(assignments), self.operands))
-        icmp_formula = formulas[cond](*atoms)
-        def_formula = Iff(icmp_formula, self.defined_variable.symbol)
-        assignments[self.defined_variable] = icmp_formula
-        path[-1][1].append(def_formula)
+        return formulas[cond](*atoms)
 
-    def _phi(self, path: list, assignments: dict, store):
+    def _phi(self, assignments: dict, store, prev_blk):
         # find branches (2nd of pairs)
         labels = re.findall('%\w+\s*\]', str(self.llvm_val))
         labels = list(map(lambda label: re.findall('\w+', label)[0], labels))
         # get blocks from labels
         assert len(labels) == len(self.operands)
         for (op, label) in zip(self.operands, labels):
-            if label == path[-2][0].name:
-                phi_formula = op.formula(assignments)
-                def_formula = EqualsOrIff(self.defined_variable.symbol, phi_formula)
-                assignments[self.defined_variable] = phi_formula
-                path[-1][1].append(def_formula)
-                break
+            if label == prev_blk:
+                return op.formula(assignments)
 
-    def _call(self, path: list, assignments: dict, store):
-        fn = self.operands[-1].value.name # function is last operand for some reason
-        rettype = None
+    def _call(self, assignments: dict, store):
         if self.defined_variable == None:
-            # result is discarded
-            return
+            return None
+        else:
+            return self.defined_variable.symbol
 
-        rettype = self.defined_variable.type
-        assignments[self.defined_variable] = self.defined_variable.symbol
-
-    def _getelementptr(self, path: list, assignments: dict, store):
+    def _getelementptr(self, assignments: dict, store):
         baseptr = self.operands[0]
         assert baseptr.value.type.is_pointer
         baseptr_bits = baseptr.value.type.bitwidth
@@ -363,22 +356,17 @@ class Instruction(Value):
             index_formula = BVConcat(index_formula, BVZero(pointee_bytes_log2))
 
         formula = BVAdd(formula, index_formula)
-            
-        assignments[self.defined_variable] = formula
-        def_formula = EqualsOrIff(formula, self.defined_variable.symbol)
-        path[-1][1].append(def_formula)
+        return formula
 
-    def _sext(self, path: list, assignments: dict, store):
+    def _sext(self, assignments: dict, store):
         dst_bits = self.defined_variable.type.bitwidth
         src = self.operands[0]
         src_bits = src.value.type.bitwidth
         assert dst_bits >= src_bits
         sext_formula = BVSExt(src.formula(assignments), dst_bits - src_bits)
-        def_formula = EqualsOrIff(sext_formula, self.defined_variable.symbol)
-        assignments[self.defined_variable] = sext_formula
-        path[-1][1].append(def_formula)
+        return sext_formula
 
-    def _inttoptr(self, path: list, assignments: dict, store):
+    def _inttoptr(self, assignments: dict, store):
         dst_bits = self.defined_variable.type.bitwidth
         src_bits = self.operands[0].value.type.bitwidth
         formula = self.operands[0].formula(assignments)
@@ -386,9 +374,7 @@ class Instruction(Value):
             formula = BVExtract(formula, end=(dst_bits - 1))
         elif dst_bits > src_bits:
             formula = BVZExt(formula, dst_bits - src_bits)
-        assignments[self.defined_variable] = formula
-        def_formula = EqualsOrIff(self.defined_variable.symbol, formula)
-        path[-1][1].append(def_formula)
+        return formula
         
 class Block(Value):
     def __init__(self, llvm_blk: llvm.ValueRef, str2var: dict):
@@ -459,7 +445,7 @@ class Block(Value):
         l = list()
         for inst in self.instructions:
             if inst.opcode == 'call':
-                if inst.operands[-1].value.name == name:
+                if inst.operands[-1].value.name == name: # fn name is the last operand
                     l.append(inst)
         return l
 
