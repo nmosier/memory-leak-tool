@@ -88,9 +88,10 @@ class ExecutionEngine:
                 constraints.append(constraint)
         formula = And(*constraints)
 
-        print('=================')
-        print('path:', list(map(lambda pair: pair[0].name, path)))
-        print('formula:', serialize(formula))
+        if verbose:
+            print('=================')
+            print('path:', list(map(lambda pair: pair[0].name, path)))
+            print('formula:', serialize(formula))
 
         retv = True
         
@@ -99,12 +100,14 @@ class ExecutionEngine:
             res_reachability = solver.solve()
 
             if not res_reachability:
-                print('UNREACHABLE')
+                if verbose:
+                    print('UNREACHABLE')
                 retv = False
             else:
                 model = solver.get_model()
                 values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
-                print('REACHABLE:', values)
+                if verbose:
+                    print('REACHABLE:', values)
             
                 solver.push()
 
@@ -122,7 +125,8 @@ class ExecutionEngine:
 
                 solver.pop()
 
-        print('=================')
+        if verbose:
+            print('=================')
         
         # return not is_sat
         return retv
@@ -203,7 +207,6 @@ class TwoCallVerifier:
 
     def closes_have_open_pred(self, path, assignments, state):
         (opens, closes) = self.get_calls(path)
-        print('opens {} closes {}'.format(len(opens), len(closes)))
         def close_has_open(close: Instruction) -> pysmt.formula:
             return Or(*map(lambda open: EqualsOrIff(open.defined_variable.symbol,
                                                close.operands[0].formula(assignments)), opens))
@@ -223,17 +226,13 @@ class TwoCallVerifier:
 
     
 parser = argparse.ArgumentParser()
-parser.add_argument('file', type=str, nargs=1)
-parser.add_argument('-f', '--funcs', type=str, default='malloc,free')
+parser.add_argument('file', type=str, nargs=1) 
+parser.add_argument('-v,--verbose', action='store_true', dest='verbose')
 args = parser.parse_args()
-funcs = args.funcs.split(',')
-if len(funcs) != 2:
-    print('{}: --funcs: exactly two comma-separated function names are required'.
-          format(sys.argv[0]), file=sys.stderr)
-    exit(1)
 assert len(args.file) == 1
 ll_path = args.file[0]
 module = Module.parse_file(ll_path)
+verbose = args.verbose
 
 
 for fn in module.function_definitions:
