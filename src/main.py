@@ -170,11 +170,14 @@ class CorrectnessPredicate:
         
 class TwoCallVerifier:
     def __init__(self, open_fn, close_fn):
-        preds = [CorrectnessPredicate(self.double_close_pred, None, 'double close'),
-                 CorrectnessPredicate(self.opens_have_close_pred, list(), 'open w/o close'),
-                 CorrectnessPredicate(self.closes_have_open_pred, None, 'close w/o open'),
+        preds = [CorrectnessPredicate(self.double_close_pred, None,
+                                      'double {}'.format(close_fn.name)),
+                 CorrectnessPredicate(self.opens_have_close_pred, list(),
+                                      '{} w/o {}'.format(open_fn.name, close_fn.name)),
+                 CorrectnessPredicate(self.closes_have_open_pred, None,
+                                      '{} w/o {}'.format(close_fn.name, open_fn.name)),
                  CorrectnessPredicate(self.closes_valid_arg_pred, None,
-                                      'invalid argument to close'),
+                                      'invalid argument to {}'.format(close_fn.name)),
         ]
         assumptions = [self.opens_distinct_assumption] # , self.opens_valid_rv_assumption]
         self.open_fn = open_fn
@@ -229,7 +232,7 @@ class TwoCallVerifier:
     
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1) 
-parser.add_argument('-v,--verbose', action='store_true', dest='verbose')
+parser.add_argument('-v', '--verbose', action='store_true', dest='verbose')
 args = parser.parse_args()
 assert len(args.file) == 1
 ll_path = args.file[0]

@@ -271,7 +271,9 @@ class Instruction(Value):
         else:
             assert formula == None
 
-
+    # The below functions return the formula of the defined variable or None if
+    # there is no defined variable
+    
     def _bitcast(self, assignments: dict, store):
         return self.operands[0].formula(assignments)
 
@@ -325,7 +327,7 @@ class Instruction(Value):
 
     def _call(self, assignments: dict, store):
         if self.defined_variable == None:
-            return None
+            return None # result of call is discarded
         else:
             return self.defined_variable.symbol
 
