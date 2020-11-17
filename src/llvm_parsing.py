@@ -1,5 +1,12 @@
-# type declaration
+# type declarations
 SymbolicStore = None
+Block = None
+
+from copy import copy
+import enum
+import math
+import re # regex parsing
+from typing import List, Tuple
 
 from llvmlite import binding as llvm
 #from llvmlite import ir as lc
@@ -7,10 +14,6 @@ from llvmlite import binding as llvm
 from pysmt.shortcuts import * # are both imports here necessary?
 from pysmt.typing import *
 
-from copy import copy
-import enum
-import math
-import re # regex parsing
 
 __all__ = ["Module", "Function", "Variable", "Instruction", "Block"]
 
@@ -240,7 +243,7 @@ class Instruction(Value):
 
     # path: dictionary from blocks -> info
     # assignments: dictionary from Variable -> pysmt.formula
-    def apply(self, path: list, assignments: dict, store: SymbolicStore):
+    def apply(self, path: List[Tuple[Block,List]], assignments: dict, store: SymbolicStore):
         if self.defined_variable != None:
             self.defined_variable.new_symbol()
         
@@ -404,7 +407,7 @@ class Block(Value):
         # whether returns
         self.returns = self.instructions[-1].opcode in ['ret']
 
-    def apply(self, path: list, assignments: dict, store):
+    def apply(self, path: List[Tuple[Block, List]], assignments: dict, store):
         for inst in self.instructions[:-1]:
             inst.apply(path, assignments, store)
         
@@ -452,7 +455,7 @@ class Block(Value):
             assert False
 
     # returns list of instructions calling a given function
-    def calls(self, name: str) -> list[Instruction]:
+    def calls(self, name: str) -> List[Instruction]:
         l = list()
         for inst in self.instructions:
             if inst.opcode == 'call':
