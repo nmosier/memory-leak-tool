@@ -1,3 +1,6 @@
+# type declaration
+SymbolicStore = None
+
 from llvmlite import binding as llvm
 #from llvmlite import ir as lc
 
@@ -11,7 +14,6 @@ import re # regex parsing
 
 __all__ = ["Module", "Function", "Variable", "Instruction", "Block"]
 
-SymbolicStore = None
 
 '''
 This file defines classes which are wrappers around functionality provided by
