@@ -1,13 +1,15 @@
 #!/usr/local/bin/python3
 
-from llvm_wrappers import *
+from llvm_parsing import *
 from smt_tools import *
 
-from pysmt.shortcuts import *
-from pysmt.typing import *
 import argparse
 from copy import copy
 import math
+from typing import List
+
+from pysmt.shortcuts import *
+from pysmt.typing import *
 
 def flatten(container: list) -> list:
     acc = list()
@@ -18,7 +20,7 @@ def flatten(container: list) -> list:
             acc.append(e)
     return acc
 
-def path_get_calls(path: list[Block], *args) -> list[Instruction]:
+def path_get_calls(path: List[Block], *args) -> List[Instruction]:
     t = tuple(map(lambda name: flatten(list(map(lambda blk: blk.calls(name), path))), args))
     return t[0] if len(t) == 1 else t
 
@@ -182,14 +184,14 @@ class TwoCallVerifier:
     def run(self):
         self.eng.run()
 
-    def get_calls(self, path: list[Block]) -> tuple:
+    def get_calls(self, path: List[Block]) -> tuple:
         return path_get_calls(path, self.open_fn.name, self.close_fn.name)
 
-    def double_close_pred(self, path: list[Block], assignments: dict, state) -> pysmt.formula:
+    def double_close_pred(self, path: List[Block], assignments: dict, state) -> pysmt.formula:
         (opens, closes) = self.get_calls(path)
         return Not(AllDifferent(*map(lambda c: c.operands[0].formula(assignments), closes)))
 
-    def opens_have_close_pred(self, path: list[Block], assignments: dict, state) -> pysmt.formula:
+    def opens_have_close_pred(self, path: List[Block], assignments: dict, state) -> pysmt.formula:
         if not path[-1].returns:
             return FALSE()
         
