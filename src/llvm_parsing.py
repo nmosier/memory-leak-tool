@@ -1,5 +1,4 @@
 # type declarations
-SymbolicStore = None
 Block = None
 
 from copy import copy
@@ -15,12 +14,15 @@ from pysmt.shortcuts import * # are both imports here necessary?
 from pysmt.typing import *
 
 
-__all__ = ["Module", "Function", "Variable", "Instruction", "Block"]
+__all__ = ["Module", "Function", "Variable", "SymbolicStore", "Instruction", "Block"]
 
 
 '''
 This file defines classes which are wrappers around functionality provided by
 llvmlite, a package which allows us to work with the IR of the llvm compiler.
+It also includes some tools for symbolic execution of sections of code,
+including functions to symbolically execute blocks and single instructions
+and a symbolic implementation of memory.
 
 Module: keeps a list of global variables, i.e. functions defined in the C file.
 TODO: currently doesn't handle global vairables that aren't functions.
@@ -38,6 +40,9 @@ portions of the LLVM IR and additionally includes a method new_symbol that
 updates the symbol corresponding to this variable, useful if for example we
 are checking a loop.
 
+SymbolicStore: is an implementation of a symbolic memory system, used for
+symbolically simulating eecution.
+
 Instruction: tracks operands, opcode, and, if any, the variable assigned.
 Instruction.apply() applies an instruction to continue a path of symbolic
 execution, tracking the formulae that must be true in order to execute this
@@ -52,7 +57,6 @@ any symbol updates by Variable.new_symbol.
 Type: is a wrapper for llvm.TypeRef, useful for things like determining the bit
 width of a variable.
 '''
-
 
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
@@ -222,6 +226,28 @@ class Operand(Value):
             return self.value.pysmt_formula
         else:
             assert False
+
+class SymbolicStore:
+    def __init__(self, fn: Function):
+        self.fn = fn
+        self.tab = dict()
+
+    def __copy__(self):
+        store = SymbolicStore(self.fn)
+        store.tab = copy(self.tab)
+        return store
+
+    def alloc(self, var: Variable):
+        assert not var in self.tab
+        self.tab[var] = None
+
+    def store(self, var: Variable, val: pysmt.formula):
+        assert var in self.tab
+        self.tab[var] = val
+
+    def load(self, var: Variable) -> pysmt.formula:
+        assert var in self.tab
+        return self.tab[var]
 
 class Instruction(Value):
     def __init__(self, llvm_inst: llvm.ValueRef, str2var: dict, str2blk: dict):

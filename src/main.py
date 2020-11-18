@@ -1,7 +1,6 @@
 #!/usr/local/bin/python3
 
 from llvm_parsing import *
-from smt_tools import *
 
 import argparse
 from copy import copy
