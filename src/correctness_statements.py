@@ -7,25 +7,38 @@ Block = Any
 Instruction = Any
 pysmt_formula = Any
 
-
-
 '''
-Functions to build correctness statements given two functions (``open''
-and ``close'') which must be called in pairs
+Tools to build correctness statements given two resource allocation/
+deallocation functions (``open''/``close'') which must be called in pairs.
 
-Assumptions: statements that must be true about any execution path
+FunctionModel: Contains the formula which determines whether the resource
+has been successfully (de)allocated. This is important because we want to
+verify that every successful allocation has a corresponding deallocation,
+but that we do not attempt deallocations after unsuccessful allocations.
 
-Correctness Predicates: statements that, if false, would detect an
-invalid execution path
+We instantiate FunctionModel for malloc/free, open/close and mmap/munmap.
 
-The signature of both statements is a function
-(path: List[Block], assignments: Dict[Variable, pysmt.Symbol]) -> pysmt.formula
-We refer to this type as Statement.
+Statement: effectively a function that takes in an execution path and a
+set of symbolic assignments and returns a symbolic formula capturing a
+desired correctness property. We split these into two categories:
+- Assumptions: statements that are true about any valid execution path
+- Correctness Predicates: statements that we will attempt to verify
+Predicates additionally have an error message that will be printed if
+the model checker successfully falsifies the predicate.
+
 '''
 
 __all__ = [
     'malloc_fn', 'free_fn', 'open_fn', 'close_fn', 'mmap_fn', 'munmap_fn',
     'make_predicates', 'make_assumptions']
+
+# ===================================
+# Symbolic statements about functions
+# ===================================
+
+# Includes FunctionModel class and implementations of it for three
+# pairs of resource allocation/deallocation functions, which are
+# malloc/free, open/close, and mmap/munmap
 
 class FunctionModel:
     """ name is the name of the function
@@ -64,8 +77,15 @@ mmap_fn = FunctionModel('\x01_mmap', mmap_succeeded)
 munmap_fn = FunctionModel('\x01_munmap', munmap_valid_arg)
 
 
+# =========================================================
+# Statements determining valid and correct execution traces
+# =========================================================
 
-
+# Includes Statement class, some predicates and assumptions
+# extending Statement, and functions make_predicates() and
+# make_assumptions() to give the list of predicates/
+# assumptions corresponding to a given pair of open/close
+# functions (like malloc/free)
 
 class Statement:
     def __init__(self, open_fn: FunctionModel, close_fn: FunctionModel, msg):
@@ -146,13 +166,3 @@ def make_predicates(open_fn, close_fn):
 def make_assumptions(open_fn, close_fn):
     assumptions = [OpensDistinctAss]#,OpensSuccessfulAss]
     return [ass(open_fn, close_fn, None) for ass in assumptions]
-
-    
-#def get_calls(self, path: List[Block]) -> tuple:
-#    return path_get_calls(path, self.open_fn.name, self.close_fn.name)
-# returns two lists of instructions
-
-
-# get_calls(path:list[block], fn_name)
-# map(lambda blk: blk.calls(name, path)) -> one list[Instruction] for each  blk
-# flatten: one total list[Instruction]
