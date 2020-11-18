@@ -110,13 +110,13 @@ class ExecutionEngine:
             # check if any predicate can fail
             for pred in self.predicates:
                 solver.push()
-                formula = Not(pred(path_blks, assignments)) # todo un-not, FALSE FORMULA, etc
-                solver.add_assertion(formula)
+                formula = pred(path_blks, assignments)
+                solver.add_assertion(Not(formula))
                 if solver.solve(): # if the predicate fails
                     model = solver.get_model()
                     values = model.get_values(map(lambda arg: arg.symbol, self.fn.arguments))
                     print('INCORRECT: {}: {}'.format(pred.msg, values))
-                    print('FORMULA: {}'.format(formula)) 
+                    print('FALSE FORMULA: {}'.format(formula))
                     print('MODEL:\n{}'.format(model))
                     return False
                 solver.pop()
