@@ -1,4 +1,4 @@
-# type declarations
+# type declaration of sorts
 Block = None
 
 from copy import copy
@@ -18,6 +18,8 @@ __all__ = ["Module", "Function", "Variable", "SymbolicStore", "Instruction", "Bl
 
 
 '''
+Tools for parsing and symbolically executing the LLVM IR.
+
 This file defines classes which are wrappers around functionality provided by
 llvmlite, a package which allows us to work with the IR of the llvm compiler.
 It also includes some tools for symbolic execution of sections of code,

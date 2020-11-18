@@ -1,6 +1,6 @@
 #!/usr/local/bin/python3
 
-from llvm_parsing import *
+from llvm_util import *
 
 import argparse
 from copy import copy
