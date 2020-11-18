@@ -1,0 +1,6 @@
+for file in *.ll
+do
+  echo $file
+  python3.7 ../src/main.py $@ $file
+  echo; echo
+done
