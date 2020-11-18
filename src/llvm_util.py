@@ -1,12 +1,12 @@
-# type declarations
-SymbolicStore = None
-Block = None
-
 from copy import copy
 import enum
 import math
 import re # regex parsing
-from typing import List, Tuple
+from typing import *
+
+# type declarations
+Block = Any
+pysmt_formula = Any
 
 from llvmlite import binding as llvm
 #from llvmlite import ir as lc
@@ -14,13 +14,20 @@ from llvmlite import binding as llvm
 from pysmt.shortcuts import * # are both imports here necessary?
 from pysmt.typing import *
 
+ID_FN = lambda x: x
 
-__all__ = ["Module", "Function", "Variable", "Instruction", "Block"]
+
+__all__ = ["Module", "Function", "Variable", "SymbolicStore", "Instruction", "Block"]
 
 
 '''
+Tools for parsing and symbolically executing the LLVM IR.
+
 This file defines classes which are wrappers around functionality provided by
 llvmlite, a package which allows us to work with the IR of the llvm compiler.
+It also includes some tools for symbolic execution of sections of code,
+including functions to symbolically execute blocks and single instructions
+and a symbolic implementation of memory.
 
 Module: keeps a list of global variables, i.e. functions defined in the C file.
 TODO: currently doesn't handle global vairables that aren't functions.
@@ -38,6 +45,9 @@ portions of the LLVM IR and additionally includes a method new_symbol that
 updates the symbol corresponding to this variable, useful if for example we
 are checking a loop.
 
+SymbolicStore: is an implementation of a symbolic memory system, used for
+symbolically simulating eecution.
+
 Instruction: tracks operands, opcode, and, if any, the variable assigned.
 Instruction.apply() applies an instruction to continue a path of symbolic
 execution, tracking the formulae that must be true in order to execute this
@@ -52,7 +62,6 @@ any symbol updates by Variable.new_symbol.
 Type: is a wrapper for llvm.TypeRef, useful for things like determining the bit
 width of a variable.
 '''
-
 
 class Module:
     def __init__(self, llvm_module: llvm.ModuleRef):
@@ -92,19 +101,24 @@ class Function(Value):
         # construction str -> variable map
         str2var = copy(str2var)
         ## instructions
+        vars_defined = []
         for llvm_blk in llvm_fn.blocks:
+            blk_defined_vars = []
             for llvm_inst in llvm_blk.instructions:
                 llvm_inst_str = str(llvm_inst)
                 if re.match('\s*%\w+\s*=', llvm_inst_str):
                     var = Variable.from_inst(llvm_inst)
                     str2var[llvm_inst_str] = var
+                    blk_defined_vars.append(var)
+            vars_defined.append(blk_defined_vars)
+
         ## arguments
         for llvm_arg in llvm_fn.arguments:
             str2var[str(llvm_arg)] = Variable.from_arg(llvm_arg)
         
         # blocks
         ## construct str -> block map
-        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, str2var), llvm_fn.blocks))
+        self.blocks = [ Block(llvm_blk) for llvm_blk in llvm_fn.blocks ]
         str2blk = dict(map(lambda blk: (str(blk.llvm_val), blk), self.blocks))
         
         # arguments
@@ -116,23 +130,31 @@ class Function(Value):
         
         # set block predecessors
         for blk in self.blocks:
-            for successor in blk.successors.keys():
+            for successor in blk.successor_blks:
                 successor.predecessors.append(blk)
-        
+
+        # compute which block defines each variable
+        for (blk, defns) in zip(self.blocks, vars_defined):
+            for var in defns:
+                var.defining_blk = blk
+
         ## TODO
         
 class Variable(Value):
-    def __init__(self, llvm_val: llvm.ValueRef, name: str):
+    def __init__(self, llvm_val: llvm.ValueRef, name: str, symbol_format_str: str):
         Value.__init__(self, llvm_val)
         self.name = name
         self.type = Type(llvm_val.type)
-        self.symbol = Symbol('v_' + self.name, self.type.pysmt_type)
+        self.sym_name = symbol_format_str
+        self.symbol = Symbol(self.sym_name.format(1), self.type.pysmt_type)
+        # self.defining_blk = None ## will be instantiated as a Block later
         
     def __repr__(self):
         return '{{.name = {}, .type = {}, .symbol = {}}}'.format(self.name, self.type, self.symbol)
 
-    def new_symbol(self):
-        self.symbol = Symbol(self.symbol.symbol_name() + '^', self.type.pysmt_type)
+    def current_symbol(self, path_blk: List[Block]):
+        self.symbol = Symbol(self.sym_name.format(path_blk.count(self.defining_blk)),
+                             self.type.pysmt_type)
         return self.symbol
     
     @staticmethod
@@ -140,21 +162,21 @@ class Variable(Value):
         # name
         llvm_inst_str = str(llvm_inst)
         full_name = re.search('%\w+', llvm_inst_str).group(0)
-        name = full_name[1:]
-        return Variable(llvm_inst, llvm_inst.block.function.name + '_' + name)
+        name = llvm_inst.block.function.name + '_' + full_name[1:]
+        return Variable(llvm_inst, name, "v_" + name + "~{}")
 
     @staticmethod
     def from_arg(llvm_arg: llvm.ValueRef):
         # name
         llvm_arg_str = str(llvm_arg)
-        name = llvm_arg_str.split()[1][1:]
-        return Variable(llvm_arg, llvm_arg.function.name + '_' + name)
+        name = llvm_arg.function.name + '_' + llvm_arg_str.split()[1][1:]
+        return Variable(llvm_arg, name, "v_" + name)
 
     # works with both declarations and definitions
     @staticmethod
     def from_func(llvm_decl: llvm.ValueRef):
         # TODO: possible name collisions with global variables
-        return Variable(llvm_decl, llvm_decl.name)
+        return Variable(llvm_decl, llvm_decl.name, llvm_decl.name)
 
 class Immediate(Value):
     def __init__(self, llvm_op: llvm.ValueRef):
@@ -223,6 +245,28 @@ class Operand(Value):
         else:
             assert False
 
+class SymbolicStore:
+    def __init__(self, fn: Function):
+        self.fn = fn
+        self.tab = dict()
+
+    def __copy__(self):
+        store = SymbolicStore(self.fn)
+        store.tab = copy(self.tab)
+        return store
+
+    def alloc(self, var: Variable):
+        assert not var in self.tab
+        self.tab[var] = None
+
+    def store(self, var: Variable, val: pysmt.formula):
+        assert var in self.tab
+        self.tab[var] = val
+
+    def load(self, var: Variable) -> pysmt.formula:
+        assert var in self.tab
+        return self.tab[var]
+
 class Instruction(Value):
     def __init__(self, llvm_inst: llvm.ValueRef, str2var: dict, str2blk: dict):
         Value.__init__(self, llvm_inst)
@@ -245,55 +289,61 @@ class Instruction(Value):
     # assignments: dictionary from Variable -> pysmt.formula
     def apply(self, path: List[Tuple[Block,List]], assignments: dict, store: SymbolicStore):
         if self.defined_variable != None:
-            self.defined_variable.new_symbol()
+            self.defined_variable.current_symbol([blk for blk, _ in path])
         
         d = {'store': self._store,
              'icmp':  self._icmp,
              'load':  self._load,
-             'phi':   self._phi,
+             # applying a phi node requires knowledge of the previous block
+             'phi':   lambda *args: self._phi(*args, prev_blk=path[-2][0].name),
              'alloca':self._alloca,
              'call':  self._call,
              'getelementptr': self._getelementptr,
              'sext': self._sext,
              'inttoptr': self._inttoptr,
-             'bitcast': self._nop,
+             'bitcast': self._bitcast,
              'and': self._binop,
              'or': self._binop,
              'add': self._binop,
              }
-        d[self.opcode](path, assignments, store)
+        formula = d[self.opcode](assignments, store)
+        if self.defined_variable != None:
+            assert formula != None
+            assignments[self.defined_variable] = formula
+            if formula != self.defined_variable.symbol:
+                path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
+        else:
+            assert formula == None
 
-    def _nop(self, path: list, assignments: dict, store):
-        assignments[self.defined_variable] = self.operands[0].formula(assignments)
+    # The below functions return the formula of the defined variable or None if
+    # there is no defined variable
+    
+    def _bitcast(self, assignments: dict, store):
+        return self.operands[0].formula(assignments)
 
-    def _binop(self, path, assignments, store):
+    def _binop(self, assignments, store):
         m = {'and': BVAnd,
              'or': BVOr,
              'add': BVAdd,
              }
-        formula = m[self.opcode](*map(lambda op: op.formula(assignments), self.operands))
-        assignments[self.defined_variable] = formula
-        path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
+        return m[self.opcode](*map(lambda op: op.formula(assignments), self.operands))
         
-    def _store(self, path: list, assignments: dict, store):
+    def _store(self, assignments: dict, store):
         dst = self.operands[1]
         val = self.operands[0]
         assert dst.value.type.is_pointer
         store.store(dst.value, val.formula(assignments))
 
-    def _load(self, path: list, assignments: dict, store):
+    def _load(self, assignments: dict, store):
         src = self.operands[0]
         assert src.kind == Operand.Kind.VARIABLE
-        load_formula = store.load(src.value)
-        def_formula = EqualsOrIff(self.defined_variable.symbol, load_formula)
-        assignments[self.defined_variable] = load_formula
-        path[-1][1].append(def_formula)
+        return store.load(src.value)
 
-    def _alloca(self, path: list, assignments: dict, store):
-        assignments[self.defined_variable] = self.defined_variable.symbol
+    def _alloca(self, assignments: dict, store):
         store.alloc(self.defined_variable)
+        return self.defined_variable.symbol
 
-    def _icmp(self, path: list, assignments: dict, store):
+    def _icmp(self, assignments: dict, store):
         cond = self.toks[3]
         formulas = {'eq': Equals,
                     'ne': NotEquals,
@@ -307,36 +357,25 @@ class Instruction(Value):
                     'sle': BVSLE
         }
         atoms = list(map(lambda op: op.formula(assignments), self.operands))
-        icmp_formula = formulas[cond](*atoms)
-        def_formula = Iff(icmp_formula, self.defined_variable.symbol)
-        assignments[self.defined_variable] = icmp_formula
-        path[-1][1].append(def_formula)
+        return formulas[cond](*atoms)
 
-    def _phi(self, path: list, assignments: dict, store):
+    def _phi(self, assignments: dict, store, prev_blk):
         # find branches (2nd of pairs)
         labels = re.findall('%\w+\s*\]', str(self.llvm_val))
         labels = list(map(lambda label: re.findall('\w+', label)[0], labels))
         # get blocks from labels
         assert len(labels) == len(self.operands)
         for (op, label) in zip(self.operands, labels):
-            if label == path[-2][0].name:
-                phi_formula = op.formula(assignments)
-                def_formula = EqualsOrIff(self.defined_variable.symbol, phi_formula)
-                assignments[self.defined_variable] = phi_formula
-                path[-1][1].append(def_formula)
-                break
+            if label == prev_blk:
+                return op.formula(assignments)
 
-    def _call(self, path: list, assignments: dict, store):
-        fn = self.operands[-1].value.name # function is last operand for some reason
-        rettype = None
+    def _call(self, assignments: dict, store):
         if self.defined_variable == None:
-            # result is discarded
-            return
+            return None # result of call is discarded
+        else:
+            return self.defined_variable.symbol
 
-        rettype = self.defined_variable.type
-        assignments[self.defined_variable] = self.defined_variable.symbol
-
-    def _getelementptr(self, path: list, assignments: dict, store):
+    def _getelementptr(self, assignments: dict, store):
         baseptr = self.operands[0]
         assert baseptr.value.type.is_pointer
         baseptr_bits = baseptr.value.type.bitwidth
@@ -363,22 +402,17 @@ class Instruction(Value):
             index_formula = BVConcat(index_formula, BVZero(pointee_bytes_log2))
 
         formula = BVAdd(formula, index_formula)
-            
-        assignments[self.defined_variable] = formula
-        def_formula = EqualsOrIff(formula, self.defined_variable.symbol)
-        path[-1][1].append(def_formula)
+        return formula
 
-    def _sext(self, path: list, assignments: dict, store):
+    def _sext(self, assignments: dict, store):
         dst_bits = self.defined_variable.type.bitwidth
         src = self.operands[0]
         src_bits = src.value.type.bitwidth
         assert dst_bits >= src_bits
         sext_formula = BVSExt(src.formula(assignments), dst_bits - src_bits)
-        def_formula = EqualsOrIff(sext_formula, self.defined_variable.symbol)
-        assignments[self.defined_variable] = sext_formula
-        path[-1][1].append(def_formula)
+        return sext_formula
 
-    def _inttoptr(self, path: list, assignments: dict, store):
+    def _inttoptr(self, assignments: dict, store):
         dst_bits = self.defined_variable.type.bitwidth
         src_bits = self.operands[0].value.type.bitwidth
         formula = self.operands[0].formula(assignments)
@@ -386,22 +420,29 @@ class Instruction(Value):
             formula = BVExtract(formula, end=(dst_bits - 1))
         elif dst_bits > src_bits:
             formula = BVZExt(formula, dst_bits - src_bits)
-        assignments[self.defined_variable] = formula
-        def_formula = EqualsOrIff(self.defined_variable.symbol, formula)
-        path[-1][1].append(def_formula)
+        return formula
         
 class Block(Value):
-    def __init__(self, llvm_blk: llvm.ValueRef, str2var: dict):
-        Value.__init__(self, llvm_blk)
-        self.predecessors = list() # populated later
+    @staticmethod
+    def _block_name(llvm_blk: llvm.ValueRef):
         re_name = re.match('\d+', str(llvm_blk).split('\n')[1])
         if re_name == None:
-            self.name = str(len(list(llvm_blk.function.arguments)))
+            return str(len(list(llvm_blk.function.arguments)))
         else:
-            self.name = re_name.group()
+            return re_name.group()
+
+    def __init__(self, llvm_blk: llvm.ValueRef):
+        Value.__init__(self, llvm_blk)
+        self.name = Block._block_name(llvm_blk)
+        self.predecessors = list() # populated later
+
+    def __str__(self): return 'b{}'.format(self.name)
+    def __repr__(self): return 'b{}'.format(self.name)
         
     def populate(self, str2var: dict, str2blk: dict):
-        self.successors = Block._get_successors(self.llvm_val, str2var, str2blk)
+        self._successor_fns, self.branching_var = \
+            Block._get_successor_fns(self.llvm_val, str2var, str2blk)
+        self.successor_blks = list(self._successor_fns) # list of successor blocks
         self.instructions = list(map(lambda llvm_inst: Instruction(llvm_inst, str2var, str2blk),
                                      self.llvm_val.instructions))
         # whether returns
@@ -410,56 +451,58 @@ class Block(Value):
     def apply(self, path: List[Tuple[Block, List]], assignments: dict, store):
         for inst in self.instructions[:-1]:
             inst.apply(path, assignments, store)
-        
-        for successor in self.successors:
-            formula = self.successors[successor]
-            symbols = list(formula.get_free_variables())
-            if len(symbols) != 0:
-                assert len(symbols) == 1
-                symbol = symbols[0]
-                newf = substitute(formula, {symbol: Symbol(symbol.symbol_name() + '^',
-                                                           get_type(symbol))})
-                self.successors[successor] = newf
-        
+
+    def compute_successors(self, path_blk: List[Block]) -> Dict[Block,pysmt_formula]:
+        args = ()  if self.branching_var is None else \
+            (self.branching_var.current_symbol(path_blk),)
+        return {blk : self._successor_fns[blk](*args) for blk in self._successor_fns}
 
     @staticmethod
-    def _get_successors(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) -> dict:
+    def _get_successor_fns(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) \
+        -> Tuple[Dict[Block,Callable], Variable]:
+        # return a dict successor_fns and an optional branching_var which may be null
+        # to get the successors of this block given path_blk: List[Block]:
+        #   set args = (branching_var.current_symbol(path_blk),)
+        #              or () if branching_var is none
+        #   and set successors = { blk: fn(*args) for kv pair (blk, fn) in successor_fns}
         last_inst = list(llvm_blk.instructions)[-1]
         last_inst_str = str(last_inst)
         if last_inst.opcode != 'br':
-            return dict()
+            return dict(), None
 
         operand_strs = list(map(str, last_inst.operands))
         if re.match(r'\s*br label', last_inst_str):
             # unconditional branch
             assert len(operand_strs) == 1
-            return {str2blk[operand_strs[0]]: TRUE()}
+            return {str2blk[operand_strs[0]]: TRUE}, None
         elif re.match(r'\s*br i1', last_inst_str):
             # conditional branch
             assert len(operand_strs) == 3
             if operand_strs[0] == 'i1 true':
-                return {str2blk[operand_strs[2]]: TRUE(),
-                        str2blk[operand_strs[1]]: FALSE(),
-                        }
+                return {str2blk[operand_strs[2]]: TRUE,
+                        str2blk[operand_strs[1]]: FALSE,
+                        }, None
             elif operand_strs[0] == 'i1 false':
-                return {str2blk[operand_strs[2]]: FALSE(),
-                        str2blk[operand_strs[1]]: TRUE(),
-                        }
+                return {str2blk[operand_strs[2]]: FALSE,
+                        str2blk[operand_strs[1]]: TRUE,
+                        }, None
                 
             var = str2var[operand_strs[0]]
             assert var.type.pysmt_type == BOOL
             # NOTE: Had to swap these for some strange reason.
-            return {str2blk[operand_strs[2]]: var.symbol,
-                    str2blk[operand_strs[1]]: Not(var.symbol)}
+            return  {str2blk[operand_strs[2]]: ID_FN, # lambda x: x, with global scope
+                     str2blk[operand_strs[1]]: Not
+                     }, var
+
         else:
             assert False
 
     # returns list of instructions calling a given function
-    def calls(self, name: str) -> List[Instruction]:
+    def calls_to(self, name: str) -> List[Instruction]:
         l = list()
         for inst in self.instructions:
             if inst.opcode == 'call':
-                if inst.operands[-1].value.name == name:
+                if inst.operands[-1].value.name == name: # fn name is the last operand
                     l.append(inst)
         return l
 
