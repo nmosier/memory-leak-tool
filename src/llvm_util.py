@@ -498,7 +498,7 @@ class Block(Value):
             assert False
 
     # returns list of instructions calling a given function
-    def calls(self, name: str) -> List[Instruction]:
+    def calls_to(self, name: str) -> List[Instruction]:
         l = list()
         for inst in self.instructions:
             if inst.opcode == 'call':

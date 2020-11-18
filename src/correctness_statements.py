@@ -29,8 +29,8 @@ the model checker successfully falsifies the predicate.
 '''
 
 __all__ = [
-    'malloc_fn', 'free_fn', 'open_fn', 'close_fn', 'mmap_fn', 'munmap_fn',
-    'make_predicates', 'make_assumptions']
+    'MALLOC', 'FREE', 'OPEN', 'CLOSE', 'MMAP', 'MUNMAP',
+    'TwoCallTracker']
 
 # ===================================
 # Symbolic statements about functions
@@ -67,102 +67,124 @@ def munmap_valid_arg(inst, assignments):
     f = inst.operands[0].formula(assignments)
     return NotEquals(f, SBV(-1, f.bv_width()))
 
-malloc_fn = FunctionModel('malloc', malloc_succeeded)
-free_fn = FunctionModel('free', lambda a, b: TRUE())
+MALLOC = FunctionModel('malloc', malloc_succeeded)
+FREE = FunctionModel('free', lambda a, b: TRUE())
 
-open_fn = FunctionModel('\x01_open', open_succeeded)
-close_fn = FunctionModel('\x01_close', close_valid_arg)
+OPEN = FunctionModel('\x01_open', open_succeeded)
+CLOSE = FunctionModel('\x01_close', close_valid_arg)
 
-mmap_fn = FunctionModel('\x01_mmap', mmap_succeeded)
-munmap_fn = FunctionModel('\x01_munmap', munmap_valid_arg)
+MMAP = FunctionModel('\x01_mmap', mmap_succeeded)
+MUNMAP = FunctionModel('\x01_munmap', munmap_valid_arg)
 
 
 # =========================================================
 # Statements determining valid and correct execution traces
 # =========================================================
 
-# Includes Statement class, some predicates and assumptions
-# extending Statement, and functions make_predicates() and
-# make_assumptions() to give the list of predicates/
-# assumptions corresponding to a given pair of open/close
-# functions (like malloc/free)
-
-class Statement:
-    def __init__(self, open_fn: FunctionModel, close_fn: FunctionModel, msg):
-        """ open_fn / close_fn are a pair like malloc/free
-            if this is a predicate, then msg should be an error message, to be
-            displayed when the predicate does not hold true. Else, msg can be
-            None. """
+class TwoCallTracker:
+    """tracks calls to a pair of functions like malloc/free during
+    symbolic depth-first search
+    Defines assumptions, which we assume to be true, and predicates,
+    which we verify to be true given the assumptions"""
+    
+    def __init__(self, open_fn: FunctionModel, close_fn: FunctionModel):
         self.open_fn = open_fn
         self.close_fn = close_fn
-        if msg != None: self.msg = msg
-    
-    def __call__(self, path:List[Block], assignments: Dict) -> pysmt.formula:
-        raise NotImplementedError()
+
+        # state tracking information
+        self.open_calls = []
+        self.close_calls = []
+        self.returns = False
+
+    class OpenCall:
+        def __init__(self, resource_ptr, success_formula):
+            self.ptr = resource_ptr
+            self.succeeded = success_formula
+    class CloseCall:
+        def __init__(self, resource_ptr, valid_formula):
+            self.ptr = resource_ptr
+            self.valid = valid_formula
+        
+    def push(self, block: Block, assignments):
+        opens = block.calls_to(self.open_fn.name)
+        self.open_calls.append([
+            OpenCall(inst.defined_variable.symbol,
+                     self.open_fn.succeeded(inst, assignments))
+            for inst in opens
+        ])
+        closes = block.calls_to(self.close_fn.name)
+        self.close_calls.append([
+            CloseCall(inst.operands[0].formula(assignments),
+                      self.close_fn.succeeded(inst, assignments))
+            for inst in closes
+        ])
+        self.returns = block.returns
+
+    def pop(self):
+        self.open_calls.pop()
+        self.close_calls.pop()
+        self.returns = False
+
+    def make_formulae(self):
+        # flatten lists of open and close calls
+        opens = sum(self.open_calls, [])
+        closes = sum(self.close_calls, [])
+
+        # make assumptions
+        ass_specs = [
+            #self._opens_successful_ass
+            self._opens_distinct_ass
+        ]
+        assumptions = [ass(opens, closes) for ass in ass_specs]
+
+        # make predicates
+        pred_specs = [
+            (self._double_close_pred, 'double {c}'),
+            #(self._opens_have_close_pred, '{o} w/o {c}'),
+            (self._closes_have_open_pred, '{c} w/o {o}'),
+            (self._closes_valid_arg_pred, 'invalid argument to {c}')
+        ]
+        if self.returns: pred_specs.append((self._opens_have_close_pred, '{o} w/o {c}'))
+        predicates = [
+            (pred(opens, closes),
+             msg.format(o=self.open_fn.name, c=self.close_fn.name))
+            for pred, msg in pred_specs
+        ]
+
+        return (assumptions, predicates)
 
     @staticmethod
-    def _get_calls_fn(path: List[Block], fn_name):
-        return sum((blk.calls(fn_name) for blk in path), [])
+    def _double_close_pred(opens: List[OpenCall], closes: List[CloseCall]):
+        return AllDifferent(close.ptr for close in closes)
 
-    def get_calls(self, path:List[Block]):
-        return (self._get_calls_fn(path,self.open_fn.name),
-                self._get_calls_fn(path,self.close_fn.name))
+    #@staticmethod # not static because of assertion only
+    def _opens_have_close_pred(self, opens: List[OpenCall], closes: List[CloseCall]):
+        assert self.returns, "should not check that opens have closes until return"
+        def has_close(open: OpenCall) -> pysmt.formula:
+            return Or(EqualsOrIff(open.ptr, close.ptr) for close in closes)
+        return And(Implies(open.succeeded, has_close(open)) for open in opens)
 
-class DoubleClosePred(Statement):
-    def __call__(self, path, assignments):
-        (opens, closes) = self.get_calls(path)
-        return AllDifferent(*map(lambda c: c.operands[0].formula(assignments), closes))
+    @staticmethod
+    def _closes_have_open_pred(opens: List[OpenCall], closes: List[CloseCall]):
+        def has_open(close: CloseCall) -> pysmt.formula:
+            return Or(EqualsOrIff(close.ptr, open.ptr) for open in opens)
+        return And(has_open(close) for close in closes)
 
-class OpensHaveClosePred(Statement):
-    def __call__(self, path, assignments):
-        if not path[-1].returns:
-            return TRUE()
-        (opens, closes) = self.get_calls(path)
+    @staticmethod
+    def _closes_valid_arg_pred(opens: List[OpenCall], closes: List[CloseCall]):
+        return And(close.valid for close in closes)
+    
+    @staticmethod
+    def _opens_successful_ass(opens: List[OpenCall], closes: List[CloseCall]):
+        # not a good assumption to make in general
+        return And(open.succeeded for open in opens)
 
-        # if open succeeded, then find close
-        def open_has_close(open: Instruction) -> pysmt.formula:
-            return Or(*map(lambda close: EqualsOrIff(open.defined_variable.symbol,
-                                                close.operands[0].formula(assignments)), closes))
+    @staticmethod
+    def _opens_distinct_ass(opens: List[OpenCall], closes: List[CloseCall]):
+        # although this can be false, it is true in the general case, so it will
+        # not compromise the validity of verification
+        return AllDifferent(open.ptr for open in opens)
 
-        opens_have_close = map(open_has_close, opens)
-        opens_succeeded = map(lambda open: self.open_fn.succeeded(open, assignments), opens)
-        valid_opens_have_close = map(lambda t: Implies(*t), zip(opens_succeeded, opens_have_close))
-        return And(*valid_opens_have_close)
-
-class ClosesHaveOpenPred(Statement):
-    def __call__(self, path, assignments):
-        (opens, closes) = self.get_calls(path)
-        def close_has_open(close: Instruction) -> pysmt.formula:
-            return Or(*map(lambda open: EqualsOrIff(open.defined_variable.symbol,
-                                               close.operands[0].formula(assignments)), opens))
-        return And(*map(close_has_open, closes))
-
-class ClosesValidArgPred(Statement):
-    def __call__(self, path, assignments):
-        (opens, closes) = self.get_calls(path)
-        return And(*map(lambda i: self.close_fn.succeeded(i, assignments), closes))
-
-class OpensSuccessfulAss(Statement):
-    def __call__(self, path, assignments):
-        (opens, closes) = self.get_calls(path)
-        return And(*map(lambda i: self.open_fn.succeeded(i, assignments), opens))
-
-class OpensDistinctAss(Statement):
-    def __call__(self, path, assignments):
-        (opens, closes) = self.get_calls(path)
-        return AllDifferent(*map(lambda open: open.defined_variable.symbol, opens))
-
-def make_predicates(open_fn, close_fn):
-    preds = [
-            (DoubleClosePred, 'double {c}'),
-            (OpensHaveClosePred, '{o} w/o {c}'),
-            (ClosesHaveOpenPred, '{c} w/o {o}'),
-            (ClosesValidArgPred, 'invalid argument to {c}')
-    ]
-    return [
-        pred(open_fn, close_fn, msg.format(o=open_fn.name, c=close_fn.name))
-        for pred, msg in preds ]
-
-def make_assumptions(open_fn, close_fn):
-    assumptions = [OpensDistinctAss]#,OpensSuccessfulAss]
-    return [ass(open_fn, close_fn, None) for ass in assumptions]
+# for type annotations only
+OpenCall = TwoCallTracker.OpenCall
+CloseCall = TwoCallTracker.CloseCall
