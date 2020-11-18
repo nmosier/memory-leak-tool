@@ -1,17 +1,20 @@
-# type declaration of sorts
-Block = None
-
 from copy import copy
 import enum
 import math
 import re # regex parsing
-from typing import List, Tuple
+from typing import *
+
+# type declarations
+Block = Any
+pysmt_formula = Any
 
 from llvmlite import binding as llvm
 #from llvmlite import ir as lc
 
 from pysmt.shortcuts import * # are both imports here necessary?
 from pysmt.typing import *
+
+ID_FN = lambda x: x
 
 
 __all__ = ["Module", "Function", "Variable", "SymbolicStore", "Instruction", "Block"]
@@ -98,19 +101,24 @@ class Function(Value):
         # construction str -> variable map
         str2var = copy(str2var)
         ## instructions
+        vars_defined = []
         for llvm_blk in llvm_fn.blocks:
+            blk_defined_vars = []
             for llvm_inst in llvm_blk.instructions:
                 llvm_inst_str = str(llvm_inst)
                 if re.match('\s*%\w+\s*=', llvm_inst_str):
                     var = Variable.from_inst(llvm_inst)
                     str2var[llvm_inst_str] = var
+                    blk_defined_vars.append(var)
+            vars_defined.append(blk_defined_vars)
+
         ## arguments
         for llvm_arg in llvm_fn.arguments:
             str2var[str(llvm_arg)] = Variable.from_arg(llvm_arg)
         
         # blocks
         ## construct str -> block map
-        self.blocks = list(map(lambda llvm_blk: Block(llvm_blk, str2var), llvm_fn.blocks))
+        self.blocks = [ Block(llvm_blk) for llvm_blk in llvm_fn.blocks ]
         str2blk = dict(map(lambda blk: (str(blk.llvm_val), blk), self.blocks))
         
         # arguments
@@ -122,23 +130,31 @@ class Function(Value):
         
         # set block predecessors
         for blk in self.blocks:
-            for successor in blk.successors.keys():
+            for successor in blk.successor_blks:
                 successor.predecessors.append(blk)
-        
+
+        # compute which block defines each variable
+        for (blk, defns) in zip(self.blocks, vars_defined):
+            for var in defns:
+                var.defining_blk = blk
+
         ## TODO
         
 class Variable(Value):
-    def __init__(self, llvm_val: llvm.ValueRef, name: str):
+    def __init__(self, llvm_val: llvm.ValueRef, name: str, symbol_format_str: str):
         Value.__init__(self, llvm_val)
         self.name = name
         self.type = Type(llvm_val.type)
-        self.symbol = Symbol('v_' + self.name, self.type.pysmt_type)
+        self.sym_name = symbol_format_str
+        self.symbol = Symbol(self.sym_name.format(1), self.type.pysmt_type)
+        # self.defining_blk = None ## will be instantiated as a Block later
         
     def __repr__(self):
         return '{{.name = {}, .type = {}, .symbol = {}}}'.format(self.name, self.type, self.symbol)
 
-    def new_symbol(self):
-        self.symbol = Symbol(self.symbol.symbol_name() + '^', self.type.pysmt_type)
+    def current_symbol(self, path_blk: List[Block]):
+        self.symbol = Symbol(self.sym_name.format(path_blk.count(self.defining_blk)),
+                             self.type.pysmt_type)
         return self.symbol
     
     @staticmethod
@@ -146,21 +162,21 @@ class Variable(Value):
         # name
         llvm_inst_str = str(llvm_inst)
         full_name = re.search('%\w+', llvm_inst_str).group(0)
-        name = full_name[1:]
-        return Variable(llvm_inst, llvm_inst.block.function.name + '_' + name)
+        name = llvm_inst.block.function.name + '_' + full_name[1:]
+        return Variable(llvm_inst, name, "v_" + name + "~{}")
 
     @staticmethod
     def from_arg(llvm_arg: llvm.ValueRef):
         # name
         llvm_arg_str = str(llvm_arg)
-        name = llvm_arg_str.split()[1][1:]
-        return Variable(llvm_arg, llvm_arg.function.name + '_' + name)
+        name = llvm_arg.function.name + '_' + llvm_arg_str.split()[1][1:]
+        return Variable(llvm_arg, name, "v_" + name)
 
     # works with both declarations and definitions
     @staticmethod
     def from_func(llvm_decl: llvm.ValueRef):
         # TODO: possible name collisions with global variables
-        return Variable(llvm_decl, llvm_decl.name)
+        return Variable(llvm_decl, llvm_decl.name, llvm_decl.name)
 
 class Immediate(Value):
     def __init__(self, llvm_op: llvm.ValueRef):
@@ -273,7 +289,7 @@ class Instruction(Value):
     # assignments: dictionary from Variable -> pysmt.formula
     def apply(self, path: List[Tuple[Block,List]], assignments: dict, store: SymbolicStore):
         if self.defined_variable != None:
-            self.defined_variable.new_symbol()
+            self.defined_variable.current_symbol([blk for blk, _ in path])
         
         d = {'store': self._store,
              'icmp':  self._icmp,
@@ -294,8 +310,8 @@ class Instruction(Value):
         if self.defined_variable != None:
             assert formula != None
             assignments[self.defined_variable] = formula
-            #if formula != self.defined_variable.symbol:
-            path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
+            if formula != self.defined_variable.symbol:
+                path[-1][1].append(EqualsOrIff(self.defined_variable.symbol, formula))
         else:
             assert formula == None
 
@@ -407,17 +423,26 @@ class Instruction(Value):
         return formula
         
 class Block(Value):
-    def __init__(self, llvm_blk: llvm.ValueRef, str2var: dict):
-        Value.__init__(self, llvm_blk)
-        self.predecessors = list() # populated later
+    @staticmethod
+    def _block_name(llvm_blk: llvm.ValueRef):
         re_name = re.match('\d+', str(llvm_blk).split('\n')[1])
         if re_name == None:
-            self.name = str(len(list(llvm_blk.function.arguments)))
+            return str(len(list(llvm_blk.function.arguments)))
         else:
-            self.name = re_name.group()
+            return re_name.group()
+
+    def __init__(self, llvm_blk: llvm.ValueRef):
+        Value.__init__(self, llvm_blk)
+        self.name = Block._block_name(llvm_blk)
+        self.predecessors = list() # populated later
+
+    def __str__(self): return 'b{}'.format(self.name)
+    def __repr__(self): return 'b{}'.format(self.name)
         
     def populate(self, str2var: dict, str2blk: dict):
-        self.successors = Block._get_successors(self.llvm_val, str2var, str2blk)
+        self._successor_fns, self.branching_var = \
+            Block._get_successor_fns(self.llvm_val, str2var, str2blk)
+        self.successor_blks = list(self._successor_fns) # list of successor blocks
         self.instructions = list(map(lambda llvm_inst: Instruction(llvm_inst, str2var, str2blk),
                                      self.llvm_val.instructions))
         # whether returns
@@ -426,47 +451,49 @@ class Block(Value):
     def apply(self, path: List[Tuple[Block, List]], assignments: dict, store):
         for inst in self.instructions[:-1]:
             inst.apply(path, assignments, store)
-        
-        for successor in self.successors:
-            formula = self.successors[successor]
-            symbols = list(formula.get_free_variables())
-            if len(symbols) != 0:
-                assert len(symbols) == 1
-                symbol = symbols[0]
-                newf = substitute(formula, {symbol: Symbol(symbol.symbol_name() + '^',
-                                                           get_type(symbol))})
-                self.successors[successor] = newf
-        
+
+    def compute_successors(self, path_blk: List[Block]) -> Dict[Block,pysmt_formula]:
+        args = ()  if self.branching_var is None else \
+            (self.branching_var.current_symbol(path_blk),)
+        return {blk : self._successor_fns[blk](*args) for blk in self._successor_fns}
 
     @staticmethod
-    def _get_successors(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) -> dict:
+    def _get_successor_fns(llvm_blk: llvm.ValueRef, str2var: dict, str2blk: dict) \
+        -> Tuple[Dict[Block,Callable], Variable]:
+        # return a dict successor_fns and an optional branching_var which may be null
+        # to get the successors of this block given path_blk: List[Block]:
+        #   set args = (branching_var.current_symbol(path_blk),)
+        #              or () if branching_var is none
+        #   and set successors = { blk: fn(*args) for kv pair (blk, fn) in successor_fns}
         last_inst = list(llvm_blk.instructions)[-1]
         last_inst_str = str(last_inst)
         if last_inst.opcode != 'br':
-            return dict()
+            return dict(), None
 
         operand_strs = list(map(str, last_inst.operands))
         if re.match(r'\s*br label', last_inst_str):
             # unconditional branch
             assert len(operand_strs) == 1
-            return {str2blk[operand_strs[0]]: TRUE()}
+            return {str2blk[operand_strs[0]]: TRUE}, None
         elif re.match(r'\s*br i1', last_inst_str):
             # conditional branch
             assert len(operand_strs) == 3
             if operand_strs[0] == 'i1 true':
-                return {str2blk[operand_strs[2]]: TRUE(),
-                        str2blk[operand_strs[1]]: FALSE(),
-                        }
+                return {str2blk[operand_strs[2]]: TRUE,
+                        str2blk[operand_strs[1]]: FALSE,
+                        }, None
             elif operand_strs[0] == 'i1 false':
-                return {str2blk[operand_strs[2]]: FALSE(),
-                        str2blk[operand_strs[1]]: TRUE(),
-                        }
+                return {str2blk[operand_strs[2]]: FALSE,
+                        str2blk[operand_strs[1]]: TRUE,
+                        }, None
                 
             var = str2var[operand_strs[0]]
             assert var.type.pysmt_type == BOOL
             # NOTE: Had to swap these for some strange reason.
-            return {str2blk[operand_strs[2]]: var.symbol,
-                    str2blk[operand_strs[1]]: Not(var.symbol)}
+            return  {str2blk[operand_strs[2]]: ID_FN, # lambda x: x, with global scope
+                     str2blk[operand_strs[1]]: Not
+                     }, var
+
         else:
             assert False
 

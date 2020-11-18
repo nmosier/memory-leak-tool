@@ -54,7 +54,7 @@ class ExecutionEngine:
         path.append((block, list()))
         self.run_block(block, path, assignments, store)
         
-        # Is this point reachable?
+        # Is this path reachable? And are all our predicates still true?
         if verbose: print('=================')
         check_res = self.check(path, assignments)
         if verbose: print('=================')
@@ -67,8 +67,9 @@ class ExecutionEngine:
             return
         
         # recurse on branches
-        for suc_blk in block.successors:
-            suc_pred = block.successors[suc_blk]
+        successors = block.compute_successors([blk for blk, _ in path])
+        for suc_blk in successors:
+            suc_pred = successors[suc_blk]
             path[-1][1].append(suc_pred)
             self.run_rec(suc_blk, path, assignments, store)
             del path[-1][1][-1]
@@ -118,6 +119,7 @@ class ExecutionEngine:
                     print('INCORRECT: {}: {}'.format(pred.msg, values))
                     print('FALSE FORMULA: {}'.format(formula))
                     print('MODEL:\n{}'.format(model))
+                    print('ASSIGNMENTS: {}'.format({k.symbol:assignments[k] for k in assignments}))
                     return False
                 solver.pop()
 
@@ -126,8 +128,6 @@ class ExecutionEngine:
 
         
 
-
-    
 parser = argparse.ArgumentParser()
 parser.add_argument('file', type=str, nargs=1) 
 parser.add_argument('-v', '--verbose', action='store_true', dest='verbose')
@@ -137,19 +137,22 @@ ll_path = args.file[0]
 module = Module.parse_file(ll_path)
 verbose = args.verbose
 
-def two_call_verify(open_fn, close_fn, fn_to_verify):
+def two_call_verify(fn_to_verify, open_fn, close_fn):
+    """Verify that the two functions open_fn and close_fn (given as instances
+       of FunctionModel and defined in correctness_statement.py) will always be
+       called in pairs"""
     preds = make_predicates(open_fn, close_fn)
     assumptions = make_assumptions(open_fn, close_fn)
-    engine = ExecutionEngine(fn, preds, assumptions, open_fn, close_fn)
+    engine = ExecutionEngine(fn_to_verify, preds, assumptions, open_fn, close_fn)
     engine.run()
 
 for fn in module.function_definitions:
     print('====== MALLOC/FREE =======')
-    two_call_verify(malloc_fn, free_fn, fn)
+    two_call_verify(fn, malloc_fn, free_fn)
     
     print('====== OPEN/CLOSE =======')
-    two_call_verify(open_fn, close_fn, fn)
+    two_call_verify(fn, open_fn, close_fn)
 
     print('====== MMAP/MUNMAP =======')
-    two_call_verify(mmap_fn, munmap_fn, fn)
+    two_call_verify(fn, mmap_fn, munmap_fn)
     
